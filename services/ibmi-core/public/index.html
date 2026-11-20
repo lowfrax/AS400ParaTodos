@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>IBM i 5250 Session</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%23000'/%3E%3Ctext x='4' y='22' font-family='monospace' font-size='16' fill='%2300ff00'%3E%3E_%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="terminal.css">
+</head>
+<body>
+<div id="window">
+  <div id="titlebar">
+    <span class="ico"></span>
+    <span id="title">Session A - [24 x 80]</span>
+    <span class="tb-right"><a href="/dashboard/" target="_blank" title="Panel del sistema en tiempo real">Panel del sistema</a></span>
+  </div>
+  <nav id="menubar">
+    <div class="menu" data-m="file"><span>File</span>
+      <div class="drop">
+        <button data-act="print">Print Screen<kbd>Ctrl+P</kbd></button>
+        <button data-act="savetext">Save Screen As Text…</button>
+        <hr>
+        <button data-act="newsession">New Session</button>
+        <button data-act="disconnect">Exit</button>
+      </div>
+    </div>
+    <div class="menu" data-m="edit"><span>Edit</span>
+      <div class="drop">
+        <button data-act="copy">Copy<kbd>Ctrl+C</kbd></button>
+        <button data-act="paste">Paste<kbd>Ctrl+V</kbd></button>
+        <button data-act="selectall">Select All<kbd>Ctrl+A</kbd></button>
+      </div>
+    </div>
+    <div class="menu" data-m="view"><span>View</span>
+      <div class="drop">
+        <button data-act="keypad">Keypad</button>
+        <hr>
+        <button data-act="theme-acs" class="radio">5250 color (Access Client Solutions)</button>
+        <button data-act="theme-crt" class="radio">Monochrome CRT (IBM 3477)</button>
+        <hr>
+        <button data-act="rule" class="check">Rule line</button>
+        <button data-act="click" class="check">Keyboard click</button>
+        <button data-act="alarm" class="check">Alarm sound</button>
+      </div>
+    </div>
+    <div class="menu" data-m="comm"><span>Communication</span>
+      <div class="drop">
+        <button data-act="disconnect">Disconnect</button>
+        <button data-act="reconnect">Reconnect</button>
+      </div>
+    </div>
+    <div class="menu" data-m="actions"><span>Actions</span>
+      <div class="drop">
+        <button data-aid="ENTER">Enter</button>
+        <button data-act="reset">Reset<kbd>Esc</kbd></button>
+        <button data-act="sysreq">System Request<kbd>Shift+Esc</kbd></button>
+        <button data-act="attn">Attention<kbd>Ctrl+Esc</kbd></button>
+        <button data-act="fieldexit">Field Exit<kbd>Ctrl+Enter</kbd></button>
+        <button data-act="erase">Erase EOF<kbd>Shift+End</kbd></button>
+        <button data-aid="PAGEDOWN">Page Down (Roll Up)</button>
+        <button data-aid="PAGEUP">Page Up (Roll Down)</button>
+      </div>
+    </div>
+    <div class="menu" data-m="window"><span>Window</span>
+      <div class="drop">
+        <button data-act="newsession">New 5250 Session</button>
+        <button data-act="dashboard">System Dashboard</button>
+      </div>
+    </div>
+    <div class="menu" data-m="help"><span>Help</span>
+      <div class="drop">
+        <button data-act="keymap">Keyboard Map</button>
+        <button data-act="about">About</button>
+      </div>
+    </div>
+  </nav>
+  <div id="toolbar">
+    <button data-act="print" title="Print Screen"><svg viewBox="0 0 24 24"><path d="M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z"/></svg><span>Print</span></button>
+    <button data-act="copy" title="Copy"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="1"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg><span>Copy</span></button>
+    <button data-act="paste" title="Paste"><svg viewBox="0 0 24 24"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/></svg><span>Paste</span></button>
+    <span class="sep"></span>
+    <button data-act="reset" title="Reset (Esc)"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/></svg><span>Reset</span></button>
+    <button data-act="sysreq" title="System Request (Shift+Esc)"><svg viewBox="0 0 24 24"><path d="M12 2v10M5.6 6.6a8 8 0 1 0 12.8 0"/></svg><span>SysReq</span></button>
+    <button data-act="keypad" title="Keypad"><svg viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg><span>Keypad</span></button>
+    <span class="sep"></span>
+    <button data-act="theme" title="Toggle ACS colors / CRT monochrome"><svg viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg><span>Display</span></button>
+    <button data-act="click" title="Keyboard click"><svg viewBox="0 0 24 24"><path d="M11 5 6 9H2v6h4l5 4V5zM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg><span>Sound</span></button>
+    <span class="sep"></span>
+    <button data-act="reconnect" title="Reconnect"><svg viewBox="0 0 24 24"><path d="M9 17H7A5 5 0 0 1 7 7h2M15 7h2a5 5 0 0 1 0 10h-2M8 12h8"/></svg><span>Connect</span></button>
+    <button data-act="disconnect" title="Disconnect"><svg viewBox="0 0 24 24"><path d="M9 17H7A5 5 0 0 1 7 7M15 7h2a5 5 0 0 1 4 8M3 3l18 18"/></svg><span>Disconnect</span></button>
+    <button data-act="keymap" title="Keyboard map"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg><span>Help</span></button>
+  </div>
+  <div id="stage">
+    <div id="crt">
+      <div id="screen" tabindex="0" aria-label="5250 display"></div>
+      <div id="cursor"></div>
+      <div id="ruleH"></div><div id="ruleV"></div>
+      <div id="oia">
+        <span id="oia-ma">M<u>A</u></span>
+        <span id="oia-a">a</span>
+        <span id="oia-lock"></span>
+        <span id="oia-mw"></span>
+        <span id="oia-ins"></span>
+        <span id="oia-msg"></span>
+        <span id="oia-pos">01/001</span>
+      </div>
+    </div>
+  </div>
+  <div id="keypad" hidden></div>
+  <div id="statusbar"><span id="conn">Connecting…</span><span id="notice"></span></div>
+</div>
+<textarea id="kbd" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" aria-hidden="true"></textarea>
+<div id="overlay" hidden><div class="dlg"><div class="dlg-title"><span id="dlg-title"></span><button id="dlg-close">✕</button></div><div id="dlg-body"></div></div></div>
+<script type="module" src="terminal.js"></script>
+</body>
+</html>

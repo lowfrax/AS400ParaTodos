@@ -1,0 +1,10 @@
+{
+  "name": "ibmi-core",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Núcleo del sistema IBM i: sesiones 5250, trabajos, CL, ejecución de programas RPG/CL",
+  "main": "src/server.js",
+  "scripts": { "start": "node src/server.js" },
+  "dependencies": { "ws": "^8.18.0" }
+}

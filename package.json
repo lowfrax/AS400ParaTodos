@@ -1,0 +1,20 @@
+{
+  "name": "as400-para-todos",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Clon educativo de IBM i (AS/400): terminal 5250 web, compilador/intérprete RPG IV y CL, y Db2 en Docker.",
+  "scripts": {
+    "start": "docker compose up -d --build",
+    "stop": "docker compose down",
+    "logs": "docker compose logs -f ibmi-core",
+    "test": "node --no-warnings --test tests/language.test.mjs",
+    "test:e2e": "node tests/e2e.mjs"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "devDependencies": {
+    "ws": "^8.23.0"
+  }
+}

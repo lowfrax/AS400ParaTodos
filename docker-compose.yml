@@ -1,0 +1,86 @@
+# AS400 para Todos: IBM Db2 + DB2 Gateway + Compilador RPG + Núcleo IBM i (terminal 5250 web).
+#   docker compose up -d --build
+#   Terminal 5250 ......... http://localhost:5250
+#   Panel del sistema ..... http://localhost:5250/dashboard/
+#   Panel del compilador .. http://localhost:5251
+#   Panel de DB2 .......... http://localhost:5252
+name: as400-para-todos
+
+services:
+  db2:
+    image: icr.io/db2_community/db2:11.5.9.0
+    container_name: as400-db2
+    hostname: db2server
+    privileged: true            # requerido por Db2 Community Edition
+    environment:
+      LICENSE: accept
+      DB2INSTANCE: db2inst1
+      DB2INST1_PASSWORD: ${DB2_PASSWORD:-as400pass}
+      DBNAME: AS400
+      BLU: "false"
+      ENABLE_ORACLE_COMPATIBILITY: "false"
+      UPDATEAVAIL: "NO"
+      TO_CREATE_SAMPLEDB: "false"
+      REPODB: "false"
+      IS_OSXFS: "false"
+      PERSISTENT_HOME: "true"
+      HADR_ENABLED: "false"
+      ETCD_ENDPOINT: ""
+      ETCD_USERNAME: ""
+      ETCD_PASSWORD: ""
+    ports:
+      - "50000:50000"
+    volumes:
+      - db2data:/database
+    healthcheck:
+      # 'setup_complete' lo crea el script del contenedor al final (tras reiniciar Db2 y hacer el backup inicial).
+      test: ["CMD-SHELL", "test -f /database/config/.shared-data/setup_complete && su - db2inst1 -c 'db2 connect to AS400 > /dev/null' || exit 1"]
+      interval: 20s
+      timeout: 15s
+      retries: 60
+      start_period: 120s
+    restart: unless-stopped
+
+  db2-gateway:
+    build: { context: ., dockerfile: services/db2-gateway/Dockerfile }
+    container_name: as400-db2-gateway
+    environment:
+      DB2_HOST: db2
+      DB2_PORT: "50000"
+      DB2_DATABASE: AS400
+      DB2_USER: db2inst1
+      DB2_PASSWORD: ${DB2_PASSWORD:-as400pass}
+    ports:
+      - "5252:5252"
+    depends_on:
+      - db2
+    restart: unless-stopped
+
+  rpg-compiler:
+    build: { context: ., dockerfile: services/rpg-compiler/Dockerfile }
+    container_name: as400-rpg-compiler
+    environment:
+      GATEWAY_URL: http://db2-gateway:5252
+    ports:
+      - "5251:5251"
+    depends_on:
+      - db2-gateway
+    restart: unless-stopped
+
+  ibmi-core:
+    build: { context: ., dockerfile: services/ibmi-core/Dockerfile }
+    container_name: as400-ibmi-core
+    environment:
+      SYSTEM_NAME: ${SYSTEM_NAME:-AS400TDS}
+      GATEWAY_URL: http://db2-gateway:5252
+      COMPILER_URL: http://rpg-compiler:5251
+      TZ: ${TZ:-America/Mexico_City}
+    ports:
+      - "5250:5250"
+    depends_on:
+      - db2-gateway
+      - rpg-compiler
+    restart: unless-stopped
+
+volumes:
+  db2data:

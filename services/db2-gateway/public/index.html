@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DB2 Gateway</title>
+<link rel="stylesheet" href="/_shared/dash.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1><span id="dot" class="dot"></span>DB2 Gateway <span class="pill" id="driver">…</span></h1>
+    <div class="sub" id="desc">Conectando…</div>
+  </div>
+  <nav id="nav"></nav>
+</header>
+<main>
+  <div class="grid">
+    <div class="card kpi"><div class="v" id="k-total">0</div><div class="l">Sentencias SQL</div></div>
+    <div class="card kpi"><div class="v" id="k-qps">0</div><div class="l">Sentencias / seg</div></div>
+    <div class="card kpi"><div class="v" id="k-avg">0</div><div class="l">Latencia media (ms)</div></div>
+    <div class="card kpi"><div class="v" id="k-err">0</div><div class="l">Errores SQL</div></div>
+    <div class="card kpi"><div class="v" id="k-rows">0</div><div class="l">Filas leídas / afectadas</div></div>
+    <div class="card kpi"><div class="v" id="k-pool">0</div><div class="l">Pool (en uso / máx)</div></div>
+  </div>
+
+  <div class="grid wide section">
+    <div class="card"><h2>Sentencias por segundo (2 min)</h2><canvas class="spark" id="c-qps"></canvas></div>
+    <div class="card"><h2>Latencia media por segundo (ms)</h2><canvas class="spark" id="c-lat"></canvas></div>
+  </div>
+
+  <div class="grid wide section">
+    <div class="card">
+      <h2>Base de datos</h2>
+      <table class="t" id="info"></table>
+      <h2 style="margin-top:14px">Clientes</h2>
+      <table class="t" id="clients"></table>
+    </div>
+    <div class="card">
+      <h2>Catálogo: bibliotecas (esquemas)</h2>
+      <div class="row" style="align-items:flex-start;gap:14px">
+        <ul class="list scroll" id="schemas" style="flex:1;min-width:160px;max-height:260px"></ul>
+        <div style="flex:2;min-width:220px">
+          <ul class="list scroll" id="tables" style="max-height:260px"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card section">
+    <h2>Consola SQL</h2>
+    <textarea id="sql" spellcheck="false">SELECT * FROM QSYS.OBJECTS FETCH FIRST 20 ROWS ONLY</textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="run">Ejecutar (Ctrl+Enter)</button>
+      <span class="muted" id="runinfo"></span>
+    </div>
+    <div class="scroll" style="margin-top:10px"><table class="t" id="result"></table></div>
+  </div>
+
+  <div class="card section">
+    <h2>Log de sentencias en tiempo real</h2>
+    <div class="scroll" style="max-height:520px">
+      <table class="t">
+        <thead><tr><th>#</th><th>Hora</th><th>Cliente</th><th>Sentencia</th><th class="num">ms</th><th class="num">Filas</th><th>Estado</th></tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+<script type="module">
+import { live, spark, $, esc, fmtTime, fmtDur, fmtBytes, navLinks } from '/_shared/dash.js';
+navLinks($('#nav'));
+let last;
+function renderStats(s) {
+  last = s;
+  $('#dot').className = 'dot ' + (s.status === 'ready' ? 'ok' : 'warn');
+  $('#driver').textContent = s.driver.toUpperCase();
+  $('#desc').textContent = s.status === 'ready'
+    ? `${s.description} · activo ${fmtDur(s.uptime)} · ${s.dashboards} panel(es) conectados`
+    : `Esperando a la base de datos (intento ${s.attempts}): ${s.error || ''}`;
+  $('#k-total').textContent = s.total.toLocaleString();
+  const h = s.history;
+  $('#k-qps').textContent = h.length ? h[h.length - 1].qps : 0;
+  $('#k-avg').textContent = s.avgMs;
+  $('#k-err').textContent = s.errors;
+  $('#k-err').className = 'v ' + (s.errors ? 'err' : '');
+  $('#k-rows').textContent = `${s.rowsReturned.toLocaleString()} / ${s.rowsAffected.toLocaleString()}`;
+  $('#k-pool').textContent = `${s.pool.used} / ${s.pool.max}`;
+  spark($('#c-qps'), h.map((x) => x.qps), { color: '#4589ff' });
+  spark($('#c-lat'), h.map((x) => x.avgMs), { color: '#42be65' });
+  const info = s.info || {};
+  const rows = [['Producto', info.product], ['Versión', info.version], ['Base de datos', info.database],
+    ['Conexiones Db2', info.connections], ['Memoria gateway', fmtBytes(s.memory)], ['Host', s.host]];
+  if (info.monitor) for (const [k, v] of Object.entries(info.monitor)) rows.push([k, v.toLocaleString()]);
+  $('#info').innerHTML = rows.filter((r) => r[1] !== undefined).map(([k, v]) => `<tr><td class="muted">${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  $('#clients').innerHTML = Object.entries(s.byClient).sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.toLocaleString()}</td></tr>`).join('') || '<tr><td class="muted">Sin actividad</td></tr>';
+}
+function logRow(q) {
+  const st = q.ok ? '<span class="ok">OK</span>' : `<span class="err" title="${esc(q.error)}">SQLSTATE ${esc(q.sqlstate)}</span>`;
+  return `<tr><td class="muted">${q.id}</td><td>${fmtTime(q.ts)}</td><td>${esc(q.client)}</td><td class="sql">${esc(q.sql)}</td><td class="num">${q.ms}</td><td class="num">${q.rows ?? ''}</td><td>${st}</td></tr>`;
+}
+const logEl = $('#log');
+live('/events', {
+  stats: renderStats,
+  log: (arr) => { logEl.innerHTML = arr.slice().reverse().map(logRow).join(''); },
+  query: (q) => {
+    logEl.insertAdjacentHTML('afterbegin', logRow(q));
+    while (logEl.children.length > 300) logEl.lastChild.remove();
+  },
+}, (ok) => { if (!ok) $('#dot').className = 'dot err'; });
+
+async function loadSchemas() {
+  const r = await fetch('/catalog/schemas').then((x) => x.json()).catch(() => []);
+  if (!Array.isArray(r)) return setTimeout(loadSchemas, 3000);
+  $('#schemas').innerHTML = r.map((s) => `<li data-s="${esc(s.name)}"><b>${esc(s.name)}</b><span class="muted">${esc(s.text)}</span></li>`).join('');
+}
+$('#schemas').addEventListener('click', async (e) => {
+  const li = e.target.closest('li'); if (!li) return;
+  [...$('#schemas').children].forEach((x) => x.classList.toggle('sel', x === li));
+  const t = await fetch('/catalog/tables?schema=' + li.dataset.s).then((x) => x.json());
+  $('#tables').innerHTML = (Array.isArray(t) ? t : []).map((x) =>
+    `<li data-q="${esc(li.dataset.s + '.' + x.name)}"><span><b>${esc(x.name)}</b> <span class="muted">${esc(x.text)}</span></span><span class="muted">${x.type}${x.card >= 0 ? ' · ' + x.card + ' filas' : ''}</span></li>`).join('')
+    || '<li class="muted">Sin tablas</li>';
+});
+$('#tables').addEventListener('click', (e) => {
+  const li = e.target.closest('li[data-q]'); if (!li) return;
+  $('#sql').value = `SELECT * FROM ${li.dataset.q} FETCH FIRST 50 ROWS ONLY`;
+  run();
+});
+async function run() {
+  $('#runinfo').textContent = 'Ejecutando…';
+  const r = await fetch('/sql', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sql: $('#sql').value, client: 'dashboard' }) }).then((x) => x.json());
+  if (r.error) {
+    $('#runinfo').innerHTML = `<span class="err">SQLSTATE ${esc(r.sqlstate)} (SQLCODE ${esc(r.sqlcode)}): ${esc(r.error)}</span>`;
+    $('#result').innerHTML = '';
+    return;
+  }
+  $('#runinfo').textContent = r.columns.length ? `${r.rows.length} fila(s) en ${r.ms} ms` : `${r.rowCount} fila(s) afectadas en ${r.ms} ms`;
+  $('#result').innerHTML = r.columns.length
+    ? `<thead><tr>${r.columns.map((c) => `<th>${esc(c.name)}</th>`).join('')}</tr></thead><tbody>` +
+      r.rows.map((row) => `<tr>${row.map((v) => `<td>${v === null ? '<span class="muted">-</span>' : esc(v)}</td>`).join('')}</tr>`).join('') + '</tbody>'
+    : '';
+}
+$('#run').onclick = run;
+$('#sql').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.ctrlKey) { e.preventDefault(); run(); } });
+loadSchemas();
+setInterval(() => { if (last?.status === 'ready' && !$('#schemas').children.length) loadSchemas(); }, 4000);
+</script>
+</body>
+</html>

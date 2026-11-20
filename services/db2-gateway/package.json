@@ -1,0 +1,10 @@
+{
+  "name": "db2-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pasarela SQL hacia IBM Db2 (ibm_db)",
+  "main": "src/server.js",
+  "scripts": { "start": "node src/server.js" },
+  "dependencies": { "ibm_db": "^4.1.1" }
+}

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IBM i System</title>
+<link rel="stylesheet" href="/_shared/dash.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1><span id="dot" class="dot"></span>Sistema IBM i <span class="pill" id="sysname">…</span></h1>
+    <div class="sub" id="desc">Conectando…</div>
+  </div>
+  <nav id="nav"></nav>
+</header>
+<main>
+  <div class="grid">
+    <div class="card kpi"><div class="v" id="k-status">IPL</div><div class="l">Estado del sistema</div></div>
+    <div class="card kpi"><div class="v" id="k-cpu">0</div><div class="l">% CPU usado (núcleo)</div></div>
+    <div class="card kpi"><div class="v" id="k-jobs">0</div><div class="l">Trabajos activos</div></div>
+    <div class="card kpi"><div class="v" id="k-sess">0</div><div class="l">Sesiones 5250</div></div>
+    <div class="card kpi"><div class="v" id="k-up">00:00:00</div><div class="l">Tiempo desde el IPL</div></div>
+    <div class="card kpi"><div class="v" id="k-mem">0</div><div class="l">Memoria del núcleo</div></div>
+  </div>
+  <div class="grid wide section">
+    <div class="card"><h2>% CPU (2 min)</h2><canvas class="spark" id="c-cpu"></canvas></div>
+    <div class="card"><h2>Servicios</h2><table class="t" id="svc"></table></div>
+  </div>
+  <div class="card section">
+    <h2>Sesiones de terminal (dispositivos QPADEVxxxx)</h2>
+    <div class="scroll"><table class="t">
+      <thead><tr><th>Dispositivo</th><th>Usuario</th><th>Trabajo</th><th>Estado</th><th>Función</th><th class="num">Pantallas</th><th>Conectado</th><th>MW</th></tr></thead>
+      <tbody id="sessions"></tbody>
+    </table></div>
+  </div>
+  <div class="card section">
+    <h2>Work with Active Jobs</h2>
+    <div class="scroll" style="max-height:520px"><table class="t">
+      <thead><tr><th>Subsistema</th><th>Trabajo</th><th>Usuario</th><th>Número</th><th>Tipo</th><th class="num">CPU %</th><th>Función</th><th>Estado</th></tr></thead>
+      <tbody id="jobs"></tbody>
+    </table></div>
+  </div>
+  <div class="card section">
+    <h2>Actividad del sistema</h2>
+    <div class="scroll"><table class="t"><tbody id="events"></tbody></table></div>
+  </div>
+</main>
+<script type="module">
+import { live, spark, $, esc, fmtTime, fmtDur, fmtBytes, navLinks } from '/_shared/dash.js';
+navLinks($('#nav'));
+live('/events', {
+  system: (s) => {
+    const ready = s.status === 'READY';
+    $('#dot').className = 'dot ' + (ready ? 'ok' : 'warn');
+    $('#sysname').textContent = `${s.name} · ${s.release}`;
+    $('#desc').textContent = ready ? `Modelo ${s.model} · serie ${s.serial} · ${s.cpus} procesadores` : `IPL en curso: ${s.step}${s.detail ? ' — ' + s.detail : ''}`;
+    $('#k-status').textContent = ready ? 'READY' : 'IPL';
+    $('#k-status').className = 'v ' + (ready ? 'ok' : 'warn');
+    $('#k-cpu').textContent = s.cpuPct.toFixed(1);
+    $('#k-jobs').textContent = s.jobs;
+    $('#k-up').textContent = fmtDur(s.uptime);
+    $('#k-mem').textContent = fmtBytes(s.rss);
+    spark($('#c-cpu'), (s.history || []).map((h) => h.cpu), { color: '#33ff66' });
+    const row = (n, ok, url, d) => `<tr><td><span class="dot ${ok ? 'ok' : 'err'}"></span>${n}</td><td class="muted">${d}</td><td><a href="${url}" target="_blank">Abrir panel</a></td></tr>`;
+    const h = location.hostname;
+    $('#svc').innerHTML = row('IBM i Core (5250)', true, `http://${h}:5250/`, 'Sesiones, trabajos, CL') +
+      row('Compilador RPG/CL/DDS', s.compiler, `http://${h}:5251/`, 'CRTBNDRPG, CRTPF…') +
+      row('DB2 Gateway', s.gateway, `http://${h}:5252/`, 'SQL y catálogo Db2');
+  },
+  sessions: (arr) => {
+    $('#k-sess').textContent = arr.length;
+    $('#sessions').innerHTML = arr.map((s) => `<tr><td><b>${esc(s.device)}</b></td><td>${esc(s.user || '—')}</td><td>${esc(s.job || 'Sign On')}</td><td>${esc(s.status)}</td><td>${esc(s.function)}</td><td class="num">${s.screens}</td><td>${fmtTime(s.connectedAt)}</td><td>${s.mw ? '<span class="warn">MW</span>' : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="muted">Sin terminales conectados. Abra la terminal 5250.</td></tr>';
+  },
+  jobs: (arr) => {
+    const order = arr.slice().sort((a, b) => a.subsystem.localeCompare(b.subsystem) || (a.type === 'SBS' ? -1 : b.type === 'SBS' ? 1 : a.name.localeCompare(b.name)));
+    $('#jobs').innerHTML = order.map((j) => `<tr><td>${j.type === 'SBS' ? '<b>' + esc(j.subsystem) + '</b>' : esc(j.subsystem)}</td><td>${j.type === 'SBS' ? '' : esc(j.name)}</td><td>${esc(j.user)}</td><td class="muted">${j.number}</td><td>${j.type}</td><td class="num">${j.cpuPct.toFixed(1)}</td><td>${esc(j.function)}</td><td class="${j.status === 'RUN' ? 'ok' : j.status === 'MSGW' ? 'warn' : ''}">${j.status}</td></tr>`).join('');
+  },
+  events: (arr) => { $('#events').innerHTML = arr.slice().reverse().map((e) => `<tr><td class="muted">${fmtTime(e.t)}</td><td>${esc(e.kind)}</td><td>${esc(e.text)}</td></tr>`).join(''); },
+  event: (e) => { $('#events').insertAdjacentHTML('afterbegin', `<tr><td class="muted">${fmtTime(e.t)}</td><td>${esc(e.kind)}</td><td>${esc(e.text)}</td></tr>`); },
+}, (ok) => { if (!ok) $('#dot').className = 'dot err'; });
+</script>
+</body>
+</html>

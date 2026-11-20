@@ -1,0 +1,74 @@
+/* Estilos comunes de los paneles de servicio (tiempo real). */
+:root {
+  --bg: #0b0f14;
+  --panel: #121821;
+  --panel-2: #18202b;
+  --line: #243041;
+  --text: #dbe4ee;
+  --muted: #8193a8;
+  --accent: #4589ff;
+  --ok: #42be65;
+  --warn: #f1c21b;
+  --err: #fa4d56;
+  --green: #33ff66;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, "Courier New", monospace;
+  --sans: "IBM Plex Sans", system-ui, "Segoe UI", Roboto, sans-serif;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f2f4f8; --panel: #ffffff; --panel-2: #f6f8fb; --line: #dde1e6;
+    --text: #161616; --muted: #5d6874; --accent: #0f62fe; --green: #198038;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 var(--sans); }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+header.top {
+  display: flex; align-items: center; gap: 16px; padding: 12px 20px;
+  border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5;
+}
+header.top h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+header.top .sub { color: var(--muted); font-size: 12px; }
+header.top nav { margin-left: auto; display: flex; gap: 14px; font-size: 13px; flex-wrap: wrap; }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: 1px; }
+.dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.dot.warn { background: var(--warn); }
+.dot.err { background: var(--err); }
+main { padding: 18px 20px 40px; max-width: 1400px; margin: 0 auto; }
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.grid.wide { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+.kpi .v { font: 600 26px/1.1 var(--mono); }
+.kpi .l { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.section { margin-top: 16px; }
+table.t { width: 100%; border-collapse: collapse; font: 12.5px/1.4 var(--mono); }
+table.t th { text-align: left; color: var(--muted); font-weight: 500; border-bottom: 1px solid var(--line); padding: 6px 8px; position: sticky; top: 0; background: var(--panel); }
+table.t td { padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.t tr:hover td { background: var(--panel-2); }
+.scroll { max-height: 420px; overflow: auto; }
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; border: 1px solid var(--line); background: var(--panel-2); }
+.sql { white-space: pre-wrap; word-break: break-word; max-width: 720px; }
+canvas.spark { width: 100%; height: 70px; display: block; }
+textarea, input, select, button {
+  font: 13px var(--mono); color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px;
+}
+button { cursor: pointer; background: var(--accent); color: #fff; border-color: var(--accent); }
+button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
+textarea { width: 100%; min-height: 80px; resize: vertical; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.list { list-style: none; padding: 0; margin: 0; }
+.list li { padding: 6px 8px; border-radius: 5px; cursor: pointer; display: flex; justify-content: space-between; gap: 8px; }
+.list li:hover, .list li.sel { background: var(--panel-2); }
+.green { color: var(--green); font-family: var(--mono); }
+pre.listing { font: 12px/1.35 var(--mono); background: #000; color: #33ff66; padding: 12px; border-radius: 6px; overflow: auto; max-height: 460px; margin: 0; }
+@media (max-width: 640px) {
+  header.top { flex-wrap: wrap; padding: 10px 16px; }
+  main { padding: 14px 16px; }
+  .grid.wide { grid-template-columns: 1fr; }
+}

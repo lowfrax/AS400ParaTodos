@@ -1,0 +1,9 @@
+{
+  "name": "rpg-compiler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Compilador ILE RPG / CL / DDS (CRTBNDRPG, CRTBNDCL, CRTPF, CRTDSPF)",
+  "main": "src/server.js",
+  "scripts": { "start": "node src/server.js" }
+}

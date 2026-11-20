@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RPG Compiler</title>
+<link rel="stylesheet" href="/_shared/dash.css">
+</head>
+<body>
+<header class="top">
+  <div>
+    <h1><span id="dot" class="dot"></span>Compilador ILE RPG · CL · DDS</h1>
+    <div class="sub" id="desc">Conectando…</div>
+  </div>
+  <nav id="nav"></nav>
+</header>
+<main>
+  <div class="grid">
+    <div class="card kpi"><div class="v" id="k-total">0</div><div class="l">Compilaciones</div></div>
+    <div class="card kpi"><div class="v ok" id="k-ok">0</div><div class="l">Objetos creados</div></div>
+    <div class="card kpi"><div class="v err" id="k-fail">0</div><div class="l">Con errores (sev ≥ 30)</div></div>
+    <div class="card kpi"><div class="v" id="k-lines">0</div><div class="l">Líneas fuente procesadas</div></div>
+    <div class="card kpi"><div class="v" id="k-inflight">0</div><div class="l">En curso</div></div>
+  </div>
+  <div class="grid wide section">
+    <div class="card"><h2>Compilaciones por minuto (1 h)</h2><canvas class="spark" id="c-pm"></canvas></div>
+    <div class="card"><h2>Por tipo de fuente</h2><table class="t" id="types"></table></div>
+  </div>
+  <div class="card section">
+    <h2>Compilaciones en tiempo real</h2>
+    <div class="scroll">
+      <table class="t">
+        <thead><tr><th>#</th><th>Hora</th><th>Mandato</th><th>Objeto</th><th>Fuente</th><th>Usuario</th><th class="num">Líneas</th><th class="num">ms</th><th>Sev</th><th>Estado</th></tr></thead>
+        <tbody id="hist"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="grid wide section">
+    <div class="card">
+      <h2>Probar el compilador</h2>
+      <div class="row" style="margin-bottom:8px">
+        <select id="ptype"><option>RPGLE</option><option>SQLRPGLE</option><option>CLLE</option><option>PF</option><option>DSPF</option></select>
+        <button id="pbtn">Compilar (sin crear objeto)</button>
+      </div>
+      <textarea id="psrc" spellcheck="false" style="min-height:260px">**FREE
+dcl-s nombre char(20) inz('mundo');
+dcl-s i int(10);
+
+for i = 1 to 3;
+  dsply ('Hola ' + %trim(nombre) + ' #' + %char(i));
+endfor;
+
+*inlr = *on;</textarea>
+    </div>
+    <div class="card">
+      <h2>Listado de compilación <span class="muted" id="lsel"></span></h2>
+      <pre class="listing" id="listing">Seleccione una compilación para ver su listado (QSYSPRT).</pre>
+    </div>
+  </div>
+</main>
+<script type="module">
+import { live, spark, $, esc, fmtTime, fmtDur, fmtBytes, navLinks } from '/_shared/dash.js';
+navLinks($('#nav'));
+const CMD = { RPGLE: 'CRTBNDRPG', SQLRPGLE: 'CRTSQLRPGI', CLLE: 'CRTBNDCL', CLP: 'CRTBNDCL', PF: 'CRTPF', DSPF: 'CRTDSPF' };
+const rows = new Map();
+function row(j) {
+  const st = j.status === 'COMPILING' ? '<span class="warn">Compilando…</span>' : j.ok ? '<span class="ok">Creado</span>' : '<span class="err">No creado</span>';
+  return `<tr data-id="${j.id}" style="cursor:pointer"><td class="muted">${j.id}</td><td>${fmtTime(j.ts)}</td><td>${CMD[j.type] || j.type}</td><td><b>${esc(j.obj)}</b></td><td>${esc(j.src)}</td><td>${esc(j.user)}</td><td class="num">${j.lines}</td><td class="num">${j.ms ?? ''}</td><td>${j.severity !== undefined ? String(j.severity).padStart(2, '0') : ''}</td><td>${st}</td></tr>`;
+}
+function upsert(j) {
+  const html = row(j);
+  const old = document.querySelector(`#hist tr[data-id="${j.id}"]`);
+  if (old) old.outerHTML = html; else $('#hist').insertAdjacentHTML('afterbegin', html);
+}
+live('/events', {
+  stats: (s) => {
+    $('#dot').className = 'dot ok';
+    $('#desc').textContent = `Activo ${fmtDur(s.uptime)} · gateway ${s.gateway} · memoria ${fmtBytes(s.memory)}`;
+    $('#k-total').textContent = s.total; $('#k-ok').textContent = s.ok; $('#k-fail').textContent = s.failed;
+    $('#k-lines').textContent = s.lines.toLocaleString(); $('#k-inflight').textContent = s.inflight.length;
+    spark($('#c-pm'), s.perMinute.map((x) => x.n), { color: '#42be65' });
+    $('#types').innerHTML = Object.entries(s.byType).map(([k, v]) => `<tr><td>${k}</td><td class="muted">${CMD[k] || ''}</td><td class="num">${v}</td></tr>`).join('') || '<tr><td class="muted">Sin compilaciones todavía</td></tr>';
+  },
+  history: (arr) => { $('#hist').innerHTML = arr.slice().reverse().map(row).join(''); },
+  start: upsert,
+  done: upsert,
+}, (ok) => { if (!ok) $('#dot').className = 'dot err'; });
+$('#hist').addEventListener('click', async (e) => {
+  const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+  const j = await fetch('/history/' + tr.dataset.id).then((r) => r.json());
+  $('#lsel').textContent = `· ${j.obj}`;
+  $('#listing').textContent = j.listing || '';
+});
+$('#pbtn').onclick = async () => {
+  $('#listing').textContent = 'Compilando…';
+  const lines = $('#psrc').value.split('\n');
+  const r = await fetch('/check', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: $('#ptype').value, source: lines, srcfile: 'PLAYGROUND', libl: ['QGPL', 'DEMOLIB'] }) }).then((x) => x.json());
+  $('#lsel').textContent = r.ok ? '· OK' : '· con errores';
+  $('#listing').textContent = r.listing;
+};
+</script>
+</body>
+</html>
