@@ -132,7 +132,8 @@ const gwReady = await createGateway(GATEWAY, 'unit-test').health().then((h) => h
 
 test('archivo con clave sobre Db2: SETLL/READ/READE/CHAIN/UPDATE/DELETE', { skip: !gwReady && `DB2 Gateway no disponible en ${GATEWAY}` }, async (t) => {
   const gw = createGateway(GATEWAY, 'unit-test');
-  await gw.sql('DROP TABLE QTEMP.UTKEYS');
+  // Restos de una ejecución interrumpida: se borran solo si existen (para no dejar errores en el panel del gateway).
+  if ((await gw.tables('QTEMP')).some?.((x) => x.name === 'UTKEYS')) await gw.exec('DROP TABLE QTEMP.UTKEYS');
   await gw.exec('CREATE TABLE QTEMP.UTKEYS (K1 CHAR(1) NOT NULL, K2 INTEGER NOT NULL, V CHAR(2) NOT NULL, PRIMARY KEY (K1, K2))');
   t.after(() => gw.sql('DROP TABLE QTEMP.UTKEYS'));
   for (const r of [['A', 1, 'a1'], ['A', 2, 'a2'], ['B', 1, 'b1'], ['C', 5, 'c5']]) await gw.exec('INSERT INTO QTEMP.UTKEYS VALUES (?, ?, ?)', r);

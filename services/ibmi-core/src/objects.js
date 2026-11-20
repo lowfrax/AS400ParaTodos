@@ -80,7 +80,12 @@ export async function initSchema() {
   for (const lib of ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS', 'QGPL', 'QTEMP']) {
     if (!names.has(lib)) await gw.schema(lib).catch(() => {});
   }
-  const r = await gw.batch(DDL, ['42710']);
+  // Solo se crean las tablas del catálogo que falten: así un re-IPL no genera errores SQL0601N en el gateway.
+  const existing = await gw.tables('QSYS');
+  if (!Array.isArray(existing)) throw new Error(`catálogo no disponible: ${existing?.error}`);
+  const have = new Set(existing.map((t) => t.name));
+  const missing = DDL.filter((sql) => !have.has(/^CREATE TABLE QSYS\.(\w+)/.exec(sql)[1]));
+  const r = missing.length ? await gw.batch(missing, ['42710']) : { results: [] };
   const bad = r.results.find((x) => !x.ok);
   if (bad) throw new Error(`Error creando catálogo del sistema: ${bad.error}`);
   for (const [name, value, text] of SYSVALS) {

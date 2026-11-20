@@ -59,7 +59,7 @@ async function doCompile(body, persist = true) {
   const job = {
     id, ts: Date.now(), type: String(body.type || 'RPGLE').toUpperCase(), obj: `${body.lib}/${body.name}`,
     src: `${body.srclib || body.lib}/${body.srcfile || ''}(${body.srcmbr || body.name})`, user: body.user || 'QSYS',
-    job: body.job || '', lines: (body.source || []).length, status: 'COMPILING',
+    job: body.job || '', lines: (body.source || []).length, status: 'COMPILING', check: !!body.check,
   };
   state.inflight.set(id, job);
   hub.broadcast('start', job);
@@ -91,7 +91,7 @@ app.get('/history/:id', (req, res) => {
 app.get('/events', (req, res) => hub.handle(req, res, [['stats', stats()], ['history', state.history.map(summary)]]));
 app.post('/compile', async (req, res) => sendJson(res, 200, await doCompile(req.body)));
 // Compilación de prueba desde el panel: no crea objetos.
-app.post('/check', async (req, res) => sendJson(res, 200, await doCompile({ lib: 'QTEMP', name: 'CHECK', user: 'DASHBOARD', ...req.body }, true)));
+app.post('/check', async (req, res) => sendJson(res, 200, await doCompile({ lib: 'QTEMP', name: 'CHECK', user: 'DASHBOARD', ...req.body, check: true }, true)));
 
 app.static('/_shared/', path.resolve(__dirname, '../../../shared/public'));
 app.static('/', path.resolve(__dirname, '../public'));
