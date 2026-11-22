@@ -181,13 +181,27 @@ export async function putObject(lib, name, type, attr, text, data, owner = 'QSEC
 export async function deleteObject(lib, name, type) {
   const o = await gw.rows(`SELECT ATTR FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
   if (!o.length) throw new CLError('CPF2105', name, lib, type);
-  if (type === '*FILE' && ['PF', 'LF', 'PF-DTA'].includes(o[0].ATTR)) await gw.exec(`DROP TABLE ${lib}.${name}`).catch(() => {});
+  if (type === '*FILE' && ['PF', 'PF-DTA'].includes(o[0].ATTR)) {
+    // Como en IBM i, no se puede borrar un físico con lógicos que dependen de él
+    const deps = await dependentLogicals(lib, name);
+    if (deps.length) throw new CLError('CPF3220', name, lib, deps[0].NAME, deps[0].LIB);
+    await gw.exec(`DROP TABLE ${lib}.${name}`).catch(() => {});
+  }
+  if (type === '*FILE' && o[0].ATTR === 'LF') await gw.exec(`DROP VIEW ${lib}.${name}`).catch(() => {});
   if (type === '*FILE' && o[0].ATTR === 'PF-SRC') {
     await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ? AND SRCF = ?`, [lib, name]);
     await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ? AND SRCF = ?`, [lib, name]);
   }
   if (type === '*DTAQ') await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ? AND NAME = ?`, [lib, name]);
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
+}
+
+/** Archivos lógicos basados en un físico (DSPDBR). */
+export async function dependentLogicals(lib, name) {
+  const rows = await gw.rows(`SELECT LIB, NAME, DATA FROM QSYS.OBJECTS WHERE TYPE = '*FILE' AND ATTR = 'LF'`, []);
+  return rows.filter((r) => {
+    try { return (JSON.parse(r.DATA).pfiles || []).some((p) => p.file === name && (p.lib || r.LIB) === lib); } catch { return false; }
+  });
 }
 
 export async function resolveObject(name, type, lib, libl) {
@@ -253,10 +267,10 @@ export async function writeMember(lib, file, mbr, lines) {
 }
 
 // ---------- Spool ----------
-export async function createSpool(job, name, lines, { usrdta = '', outq = 'PRT01' } = {}) {
+export async function createSpool(job, name, lines, { usrdta = '', outq = 'PRT01', pageLen = 60 } = {}) {
   const id = await nextId('SPLF');
   job.spoolSeq = (job.spoolSeq || 0) + 1;
-  const pages = Math.max(1, Math.ceil(lines.length / 60));
+  const pages = Math.max(1, Math.ceil(lines.length / (pageLen || 60)));
   await gw.exec(`INSERT INTO QSYS.SPLF (ID, NAME, JOBNAME, JOBUSER, JOBNBR, SPLNBR, USRDTA, OUTQ, STATUS, PAGES, NLINES, CREATED, DATA)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RDY', ?, ?, ?, ?)`,
   [id, name.slice(0, 10), job.name, job.user, job.number, job.spoolSeq, usrdta.slice(0, 10), outq, pages, lines.length, now(), lines.join('\n')]);

@@ -43,7 +43,7 @@ export async function compileObject(ctx, o) {
   }
   await createSpool(ctx.job, name, r.listing.split('\n'), { usrdta: mbrName });
   for (const m of r.messages) if (m.sev >= 30) logJob(ctx.job, m.id, '*DIAG', `${m.text}${m.line ? ` (line ${m.line})` : ''}`, { sev: m.sev });
-  const isFile = type === 'PF' || type === 'DSPF';
+  const isFile = ['PF', 'LF', 'DSPF', 'PRTF'].includes(type);
   if (!r.ok) {
     if (isFile) throw new CLError('CPF7302', name, objLib);
     const sev = String(r.severity).padStart(2, '0');
@@ -71,10 +71,28 @@ export async function compileObject(ctx, o) {
     invalidateTables(objLib);
     return [msg('CPC7301', name, objLib)];
   }
+  if (type === 'LF') {
+    if (await findObject(gw, name, '*FILE', objLib, [])) throw new CLError('CPF7302', name, objLib);
+    const res = await gw.sql(r.object.data.sql);
+    if (res.error) throw new CLError('CPF9898', `Logical file ${name} not created: ${res.error}`);
+    const { sql, ...meta } = r.object.data;
+    await putObject(objLib, name, '*FILE', 'LF', text || meta.text, meta, ctx.job.user);
+    invalidateTables(objLib);
+    return [msg('CPC7301', name, objLib)];
+  }
+  if (type === 'PRTF') {
+    if (await findObject(gw, name, '*FILE', objLib, [])) {
+      if (!o.replace) throw new CLError('CPF7302', name, objLib);
+      await deleteObject(objLib, name, '*FILE');
+    }
+    await putObject(objLib, name, '*FILE', 'PRTF', text, { ...r.object.data, pagesize: o.pagesize || [66, 132], ovrflw: o.ovrflw || 60 }, ctx.job.user);
+    return [msg('CPC7301', name, objLib)];
+  }
   await putObject(objLib, name, r.object.type, r.object.attr, text, r.object.data, ctx.job.user);
   // Las activaciones en caché del programa anterior dejan de ser válidas.
   for (const [k] of ctx.job.activations) if (k.endsWith(`/${name}`)) ctx.job.activations.delete(k);
   if (type === 'DSPF') return [msg('CPC7301', name, objLib)];
+  if (type === 'PRTF') return [msg('CPC7301', name, objLib)];
   const d = new Date();
   if (type.startsWith('CL')) return [{ id: 'CPC0904', text: `Program ${name} created in library ${objLib}.`, sev: 0 }];
   return [{ id: 'RNS9304', text: `Program ${name} placed in library ${objLib}. ${String(r.severity).padStart(2, '0')} highest severity. Created on ${sysDate(d)} at ${sysTime(d)}.`, sev: 0 }];

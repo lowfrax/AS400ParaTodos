@@ -225,6 +225,7 @@ export async function outputRecords(prog, types, excptName) {
 async function writeRecord(prog, rec, sc) {
   const ent = prog.files.get(rec.file) || prog.formats.get(rec.file);
   if (!ent) throw new RpgError('01211', 'RNX1211', `File or record format ${rec.file} is not defined.`);
+  if (ent.def.device === 'PRINTER' && ent.pfmt) { await prog.writePrtf(ent, { file: rec.file }, sc); return; }
   if (ent.def.device === 'PRINTER') {
     const text = await buildLine(prog, rec, sc);
     prog.printerFor(ent).line(text, rec);

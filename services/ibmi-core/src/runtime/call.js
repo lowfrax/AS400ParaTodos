@@ -61,7 +61,7 @@ function makeHost(ctx, pgmName) {
     user: job.user,
     describeFile: (n) => describeFile(gw, n, ctx.libl).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); }),
     openDisk: (desc) => new DiskFile({
-      name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys,
+      name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys, keyDesc: desc.keyDesc, rrn: desc.rrn,
       sql: async (t, p) => { await ctx.ensureCommit(); return gw.sql(t, p, { client, tx: job.cmt?.tx }); },
     }),
     // SET OPTION COMMIT / COMMIT / ROLLBACK (SQL) y COMMIT / ROLBK (RPG)
@@ -76,6 +76,13 @@ function makeHost(ctx, pgmName) {
       } catch (e) { return { error: e.message, sqlstate: e.sqlstate || '2D521', sqlcode: e.sqlcode ?? -751 }; }
     },
     callProc: (n, args, places) => callSystemProc(ctx, n, args, places),
+    // Archivo de impresora descrito externamente (CRTPRTF); null si no existe o no tiene DDS
+    async describePrinter(n) {
+      const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
+      const fo = await findObject(gw, nm, '*FILE', lib, ctx.libl);
+      const d = fo ? await objectData(gw, fo.LIB, nm, '*FILE') : null;
+      return d && d.kind === 'PRTF' ? d : null;
+    },
     async describeDisplay(n) {
       const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
       const fo = await findObject(gw, nm, '*FILE', lib, ctx.libl);
@@ -104,11 +111,11 @@ function makeHost(ctx, pgmName) {
         throw e;
       }
     },
-    openPrinter(name, len) {
+    openPrinter(name, len, { pageLen } = {}) {
       const lines = [];
       const h = {
         write: (line) => lines.push(String(line).slice(0, len).replace(/\s+$/, '')),
-        close: async () => { if (lines.length) { await createSpool(job, name, lines.splice(0), { usrdta: pgmName }); } },
+        close: async () => { if (lines.length) { await createSpool(job, name, lines.splice(0), { usrdta: pgmName, pageLen }); } },
       };
       printers.push(h);
       return h;

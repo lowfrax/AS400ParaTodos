@@ -291,7 +291,12 @@ class Parser {
       switch (k.kw) {
         case 'DISK': case 'SEQ': case 'SPECIAL': f.device = 'DISK'; break;
         case 'WORKSTN': f.device = 'WORKSTN'; break;
-        case 'PRINTER': f.device = 'PRINTER'; f.prtlen = k.args[0] && k.args[0].k === 'num' ? k.args[0].v : 132; break;
+        case 'PRINTER':
+          f.device = 'PRINTER';
+          f.prtlen = k.args[0] && k.args[0].k === 'num' ? k.args[0].v : 132;
+          // PRINTER sin longitud (o *EXT) es un archivo de impresora descrito externamente
+          f.prtExt = !k.args.length || (k.args[0].k === 'sp' && k.args[0].v === '*EXT');
+          break;
         case 'USAGE': f.usage = k.args.map((a) => a.v); break;
         case 'KEYED': f.keyed = true; break;
         case 'EXTFILE': case 'EXTDESC': f.extfile = refName(k.args[0], line); break;

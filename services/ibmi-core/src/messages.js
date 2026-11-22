@@ -52,6 +52,7 @@ const M = {
   CPF4101: [40, 'File &1 in library &2 not found or inline data file missing.'],
   CPF5009: [40, 'Duplicate record key in member &1.'],
   CPF7302: [40, 'File &1 not created in library &2.'],
+  CPF3220: [40, 'Cannot do operation on file &1 in &2: logical file &3 in &4 depends on it.'],
   CPF5813: [30, 'File &1 in library &2 already exists.'],
   CPF9801: [40, 'Object &1 in library &2 not found.', 'The object was not found in the library.', 'Correct the object name or library name, or create the object.'],
   CPF9810: [40, 'Library &1 not found.'],

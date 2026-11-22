@@ -67,6 +67,68 @@ const DDS = [
   '     A            IMPORT         9P 2',
 ];
 
+// DDS en columnas: nombre 19, longitud 30-34, tipo 35, decimales 36-37, línea 39-41, posición 42-44, palabras clave 45
+function A(cols = {}) {
+  let s = '     A';
+  for (const [pos, text] of Object.entries(cols).sort((a, b) => a[0] - b[0])) s = s.padEnd(Number(pos) - 1) + text;
+  return s;
+}
+const LF_DDS = [
+  A({ 17: 'R', 19: 'VENTASLR', 45: 'PFILE(VENTAS)' }),
+  A({ 17: 'K', 19: 'REGION', 45: 'DESCEND' }),
+  A({ 17: 'K', 19: 'IMPORT' }),
+  A({ 17: 'O', 19: 'IMPORT', 45: 'COMP(LE 10)' }),
+];
+const REG_DDS = [
+  A({ 17: 'R', 19: 'REGIONR' }),
+  A({ 19: 'REGION', 33: ' 4', 35: 'A' }),
+  A({ 19: 'NOMREG', 33: '15', 35: 'A' }),
+  A({ 17: 'K', 19: 'REGION' }),
+];
+const JLF_DDS = [
+  A({ 17: 'R', 19: 'VENTJR', 45: 'JFILE(VENTAS REGIONES)' }),
+  A({ 17: 'J', 45: 'JOIN(VENTAS REGIONES)' }),
+  A({ 45: 'JFLD(REGION REGION)' }),
+  A({ 19: 'REGION', 45: 'JREF(1)' }),
+  A({ 19: 'NOMREG' }),
+  A({ 19: 'CLIENT' }),
+  A({ 19: 'IMPORT' }),
+  A({ 17: 'K', 19: 'CLIENT' }),
+];
+const PRTF_DDS = [
+  A({ 17: 'R', 19: 'CABECERA', 45: 'SKIPB(1) SPACEA(2)' }),
+  A({ 42: '  2', 45: "'LISTADO POR LOGICO'" }),
+  A({ 42: ' 40', 45: 'DATE EDTCDE(Y)' }),
+  A({ 42: ' 52', 45: "'PAG'" }),
+  A({ 42: ' 56', 45: 'PAGNBR EDTCDE(Z)' }),
+  A({ 17: 'R', 19: 'DETALLE', 45: 'SPACEA(1)' }),
+  A({ 19: 'REGION', 33: ' 4', 35: 'A', 42: '  2' }),
+  A({ 19: 'CLIENT', 32: ' 10', 35: 'A', 42: '  8' }),
+  A({ 19: 'IMPORT', 33: ' 9', 35: 'P', 36: ' 2', 42: ' 20', 45: 'EDTCDE(J)' }),
+  A({ 9: '50', 42: ' 35', 45: "'*ALTO*'" }),
+  A({ 17: 'R', 19: 'TOTAL', 45: 'SPACEB(1)' }),
+  A({ 42: '  2', 45: "'TOTAL'" }),
+  A({ 19: 'TOTAL', 32: ' 11', 35: 'P', 36: ' 2', 42: ' 18', 45: 'EDTCDE(J)' }),
+];
+const LSTLOG = `**FREE
+ctl-opt dftactgrp(*no);
+dcl-f VENTASL keyed;
+dcl-f LISTADO printer oflind(*in90);
+write CABECERA;
+read VENTASL;
+dow not %eof(VENTASL);
+  *in50 = IMPORT > 500;
+  TOTAL += IMPORT;
+  if *in90;
+    write CABECERA;
+    *in90 = *off;
+  endif;
+  write DETALLE;
+  read VENTASL;
+enddo;
+write TOTAL;
+*inlr = *on;`;
+
 async function lastSpool(name) {
   const list = await api('GET', '/spool');
   const arr = Array.isArray(list) ? list : Object.values(list).filter((x) => x && x.ID);
@@ -110,6 +172,40 @@ async function lastSpool(name) {
   const a3 = list.find((o) => o.NAME === 'VENTRPT');
   const a4 = list.find((o) => o.NAME === 'VENTRPT4');
   check('atributos de objeto RPG / RPGLE', a3 && a3.ATTR === 'RPG' && a4 && a4.ATTR === 'RPGLE', `${a3 && a3.ATTR} ${a4 && a4.ATTR}`);
+
+  // ---------- Archivos lógicos (CRTLF) y de impresora (CRTPRTF) ----------
+  await api('PUT', `/sources/${LIB}/QDDSSRC/VENTASL?type=LF`, { lines: LF_DDS });
+  const clf = await cmd(`CRTLF FILE(${LIB}/VENTASL) SRCFILE(${LIB}/QDDSSRC)`, false);
+  check('CRTLF con clave DESCEND y selección/omisión', clf.status === 200, JSON.stringify(clf).slice(0, 400));
+  await api('PUT', `/sources/${LIB}/QDDSSRC/REGIONES?type=PF`, { lines: REG_DDS });
+  await cmd(`CRTPF FILE(${LIB}/REGIONES) SRCFILE(${LIB}/QDDSSRC)`);
+  for (const r of [['NORT', 'Norte'], ['SUR', 'Sur']]) await api('POST', '/sql', { sql: `INSERT INTO ${LIB}.REGIONES VALUES (?, ?)`, params: r });
+  await api('PUT', `/sources/${LIB}/QDDSSRC/VENTJ?type=LF`, { lines: JLF_DDS });
+  const cj = await cmd(`CRTLF FILE(${LIB}/VENTJ) SRCFILE(${LIB}/QDDSSRC)`, false);
+  check('CRTLF lógico de unión (JFILE/JOIN/JFLD)', cj.status === 200, JSON.stringify(cj).slice(0, 400));
+  const jr = await api('POST', '/sql', { sql: `SELECT CLIENT, NOMREG FROM ${LIB}.VENTJ ORDER BY CLIENT` });
+  check('el lógico de unión devuelve los nombres de región', (jr.data || []).length === 5 && jr.data[0].NOMREG.trim() === 'Norte', JSON.stringify(jr.data || jr).slice(0, 300));
+  const dl = await cmd(`DLTF FILE(${LIB}/VENTAS)`, false);
+  check('DLTF de un físico con lógicos dependientes: CPF3220', dl.error && dl.error.id === 'CPF3220', JSON.stringify(dl.error || dl).slice(0, 200));
+  const dbr = await cmd(`DSPDBR FILE(${LIB}/VENTAS)`, false);
+  const dbrText = JSON.stringify(dbr);
+  check('DSPDBR lista los lógicos', /VENTASL/.test(dbrText) && /VENTJ/.test(dbrText), dbrText.slice(0, 200));
+
+  await api('PUT', `/sources/${LIB}/QDDSSRC/LISTADO?type=PRTF`, { lines: PRTF_DDS });
+  const cp = await cmd(`CRTPRTF FILE(${LIB}/LISTADO) SRCFILE(${LIB}/QDDSSRC) PAGESIZE(66 80) OVRFLW(60)`, false);
+  check('CRTPRTF', cp.status === 200, JSON.stringify(cp).slice(0, 400));
+  await api('PUT', `/sources/${LIB}/QRPGLESRC/LSTLOG?type=RPGLE`, { lines: LSTLOG.split('\n') });
+  const cl = await cmd(`CRTBNDRPG PGM(${LIB}/LSTLOG) SRCFILE(${LIB}/QRPGLESRC)`, false);
+  check('CRTBNDRPG con lógico y PRTF externos', cl.status === 200, JSON.stringify(cl.messages || cl).slice(0, 600));
+  const call5 = await cmd(`CALL PGM(${LIB}/LSTLOG)`, false);
+  check('CALL LSTLOG', call5.status === 200, JSON.stringify(call5).slice(0, 300));
+  const sp5 = (await lastSpool('LISTADO')) || [];
+  console.log(sp5.filter((l) => l.trim()).map((l) => `    |${l}`).join('\n'));
+  const det = sp5.filter((l) => /^ (NORT|SUR )/.test(l)).map((l) => l.slice(1, 18).replace(/\s+/g, ' ').trim());
+  check('orden del lógico: REGION descendente, IMPORT ascendente, omitidos <= 10', JSON.stringify(det) === JSON.stringify(['SUR HOOLI', 'SUR INITECH', 'NORT GLOBEX', 'NORT ACME']), JSON.stringify(det));
+  check('PRTF: EDTCDE(J), indicador 50 y PAGNBR', sp5.some((l) => /INITECH\s+1,000\.00\s+\*ALTO\*/.test(l)) && /LISTADO POR LOGICO.*PAG\s+1/.test(sp5[0] || ''));
+  check('PRTF: total con SPACEB', sp5.some((l) => /^ TOTAL\s+1,215\.00/.test(l)));
+
   if (!failed) { await cmd(`RMVLIBLE LIB(${LIB})`, false); await cmd(`DLTLIB LIB(${LIB})`, false); }
   console.log(failed ? `\n${failed} FALLOS` : '\nTodo correcto');
   process.exit(failed ? 1 : 0);

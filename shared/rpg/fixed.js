@@ -335,7 +335,8 @@ export function convertFixed(lines, { dialect = 'RPG4' } = {}) {
   closeBlock(lastLine);
   // DCL-F al principio (antes de los cálculos)
   for (const f of fileDecls) {
-    const dev = f.device === 'PRINTER' ? `PRINTER(${f.reclen || 132})` : f.device;
+    // Impresora descrita por programa: PRINTER(longitud); descrita externamente (PRTF): PRINTER(*EXT)
+    const dev = f.device === 'PRINTER' ? (f.progDesc ? `PRINTER(${f.reclen || 132})` : 'PRINTER(*EXT)') : f.device;
     emit(`DCL-F ${f.name} ${dev}${f.usage.length && f.device !== 'PRINTER' ? ` USAGE(${f.usage.join(':')})` : f.device === 'PRINTER' ? ' USAGE(*OUTPUT)' : ''}${f.keyed ? ' KEYED' : ''} ${f.kws.join(' ')};`, f.line);
   }
   for (const [k, v] of fileInfo) if (!k.startsWith('$')) emit(`$FILEX '${b64(v)}';`, lastLine);

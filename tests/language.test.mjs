@@ -156,6 +156,56 @@ test('archivo con clave sobre Db2: SETLL/READ/READE/CHAIN/UPDATE/DELETE', { skip
   assert.deepEqual(all, ['a1', 'a2', 'zz']);
 });
 
+test('archivo con claves duplicadas y descendentes, y archivo sin clave por orden de llegada (RRN)', { skip: !gwReady && `DB2 Gateway no disponible en ${GATEWAY}` }, async (t) => {
+  const gw = createGateway(GATEWAY, 'unit-test');
+  if ((await gw.tables('QTEMP')).some?.((x) => x.name === 'UTDUPS')) await gw.exec('DROP TABLE QTEMP.UTDUPS');
+  await gw.exec('CREATE TABLE QTEMP.UTDUPS (REG CHAR(4) NOT NULL, IMP DECIMAL(7, 2) NOT NULL, V CHAR(3) NOT NULL)');
+  t.after(() => gw.sql('DROP TABLE QTEMP.UTDUPS'));
+  // 70 filas con la misma clave (más que el bloque de 64 filas) y filas idénticas
+  const rows = [['SUR', 5, 's1'], ['NORT', 1, 'n1'], ['NORT', 3, 'n2'], ['SUR', 9, 's2'], ['NORT', 3, 'n3'], ['DUP', 1, 'dd'], ['DUP', 1, 'dd']];
+  for (let i = 0; i < 70; i++) rows.push(['MUCH', i, `m${i}`]);
+  for (const r of rows) await gw.exec('INSERT INTO QTEMP.UTDUPS VALUES (?, ?, ?)', r);
+  const sql = (text, params) => gw.sql(text, params);
+  const fields = [{ name: 'REG', type: { t: 'char', len: 4 } }, { name: 'IMP', type: { t: 'packed', digits: 7, dec: 2 } }, { name: 'V', type: { t: 'char', len: 3 } }];
+  const byReg = new DiskFile({ name: 'UTDUPS', schema: 'QTEMP', table: 'UTDUPS', fields, keys: ['REG'], sql });
+  // SETLL + READE recorre todas las claves duplicadas (en orden de llegada)
+  await byReg.setll(['NORT']);
+  const nort = [];
+  for (let x = await byReg.reade(['NORT']); x; x = await byReg.reade(['NORT'])) nort.push(x.V.trim());
+  assert.deepEqual(nort, ['n1', 'n2', 'n3']);
+  await byReg.setll(['MUCH']);
+  let n = 0;
+  for (let x = await byReg.reade(['MUCH']); x; x = await byReg.reade(['MUCH'])) n++;
+  assert.equal(n, 70);
+  // Clave descendente por importe
+  const desc = new DiskFile({ name: 'UTDUPS', schema: 'QTEMP', table: 'UTDUPS', fields, keys: ['REG', 'IMP'], keyDesc: [false, true], sql });
+  await desc.setll(['SUR']);
+  const sur = [];
+  for (let x = await desc.reade(['SUR']); x; x = await desc.reade(['SUR'])) sur.push(x.V.trim());
+  assert.deepEqual(sur, ['s2', 's1']);
+  await desc.setll(['NORT']);
+  const nd = [];
+  for (let x = await desc.reade(['NORT']); x; x = await desc.reade(['NORT'])) nd.push(x.V.trim());
+  assert.deepEqual(nd, ['n2', 'n3', 'n1']);
+  // Sin clave: orden de llegada; UPDATE/DELETE de filas idénticas afecta a una sola
+  const seq = new DiskFile({ name: 'UTDUPS', schema: 'QTEMP', table: 'UTDUPS', fields, keys: [], sql });
+  const first = [];
+  for (let i = 0; i < 3; i++) first.push((await seq.read()).V.trim());
+  assert.deepEqual(first, ['s1', 'n1', 'n2']);
+  await byReg.setll(['DUP']);
+  const d1 = await byReg.reade(['DUP']);
+  await byReg.update({ ...d1, V: 'd1' });
+  const cnt = await gw.sql("SELECT V, COUNT(*) AS N FROM QTEMP.UTDUPS WHERE REG = 'DUP' GROUP BY V ORDER BY V");
+  assert.deepEqual(cnt.rows.map((r) => `${r[0].trim()}:${r[1]}`), ['d1:1', 'dd:1']);
+  const d2 = await byReg.reade(['DUP']);
+  assert.equal(d2.V.trim(), 'dd');
+  assert.equal(await byReg.delete(), true);
+  const left = await gw.sql("SELECT COUNT(*) FROM QTEMP.UTDUPS WHERE REG = 'DUP'");
+  assert.equal(Number(left.rows[0][0]), 1);
+  // CHAIN por número relativo de registro en un archivo sin clave
+  assert.equal((await seq.chain(2)).V.trim(), 'n1');
+});
+
 test('CL: análisis de mandatos, expresiones y programa NIGHTLY', () => {
   const c = parseCommand("CRTLIB LIB(MILIB) TEXT('Mi biblioteca')");
   assert.equal(c.name, 'CRTLIB');

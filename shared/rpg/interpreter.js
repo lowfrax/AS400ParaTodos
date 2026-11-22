@@ -5,7 +5,7 @@ import {
   toDate, toTime, toTimestamp, fmtDate, addDuration, diffDates, dateToJs, editc, figValue,
 } from './types.js';
 
-import { runCycle, outputRecords, Printer, loadCtdata, zonedToNumber, zonedText } from './cycle.js';
+import { runCycle, outputRecords, Printer, loadCtdata, zonedToNumber, zonedText, editWord } from './cycle.js';
 
 export { RpgError };
 export class RpgCancel extends Error {
@@ -92,11 +92,91 @@ export class RpgProgram {
       for (const [fmtName, rrnVar] of Object.entries(f.sfile)) ent.sfl[fmtName] = { rrnVar, records: [] };
     } else if (f.device === 'PRINTER') {
       const info = (this.ir.filex || {})[f.name] || {};
-      ent.prtInfo = { formlen: f.formlen || info.formlen || 66, ofl: f.formofl || info.formofl || 60, width: f.prtlen || 132, ind: (f.oflind || info.ofl || '').toUpperCase() };
-      ent.h = this.host.openPrinter(f.name, f.prtlen || 132, { pageLen: ent.prtInfo.formlen });
+      const pd = f.prtExt && this.host.describePrinter ? await this.host.describePrinter(f.extfile || f.name) : null;
+      const width = pd ? (pd.pagesize || [66, 132])[1] : f.prtlen || 132;
+      ent.prtInfo = {
+        formlen: f.formlen || info.formlen || (pd ? (pd.pagesize || [66])[0] : 66), ofl: f.formofl || info.formofl || (pd ? pd.ovrflw : 60) || 60,
+        width, ind: (f.oflind || info.ofl || '').toUpperCase(),
+      };
+      ent.h = this.host.openPrinter(f.name, width, { pageLen: ent.prtInfo.formlen });
       ent.formats = [f.name];
+      if (pd) {
+        ent.pfmt = pd;
+        ent.formats = Object.keys(pd.formats);
+        for (const [fmtName, fmt] of Object.entries(pd.formats)) {
+          this.formats.set(f.rename[fmtName] || fmtName, ent);
+          for (const it of fmt.items) if (it.name) this.ensureVar(scope, pfx(it.name), it.rpgType);
+        }
+      }
     }
     this.files.set(f.name, ent);
+  }
+
+  // WRITE de un formato de un archivo de impresora descrito externamente (DDS de PRTF)
+  async writePrtf(ent, s, sc) {
+    const fmtName = Object.keys(ent.pfmt.formats).find((n) => n === s.file || ent.def.rename[n] === s.file) || s.file;
+    const fmt = ent.pfmt.formats[fmtName];
+    if (!fmt) throw new RpgError('01211', 'RNX1211', `Record format ${s.file} is not defined in printer file ${ent.def.name}.`);
+    const prt = this.printerFor(ent);
+    const on = (cond) => (cond || []).every((c) => (this.ind[c.ind] === '1') !== c.not);
+    const pfx = ent.def.prefix || '';
+    const ctlOf = (list, kw) => (list || []).filter((c) => c.kw === kw && on(c.cond)).map((c) => c.n)[0];
+    const ec = editc;
+    const textOf = async (it) => {
+      if (!it.name) {
+        if (it.special === 'DATE') { const d = new Date(); return ec(Number(`${d.getMonth() + 1}`.padStart(2, '0') + `${d.getDate()}`.padStart(2, '0') + `${d.getFullYear() % 100}`.padStart(2, '0')), 'Y', { t: 'zoned', digits: 6, dec: 0 }); }
+        if (it.special === 'TIME') { const d = new Date(); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, '0')).join(':'); }
+        if (it.special === 'PAGNBR') { const n = prt.pages + 1; return it.edtcde ? ec(n, it.edtcde, { t: 'zoned', digits: 4, dec: 0 }) : String(n).padStart(4, '0'); }
+        return it.text || '';
+      }
+      const v = sc.lookup(pfx + it.name);
+      const val = v ? v.value : blank(it.rpgType);
+      if (isNumType(it.rpgType)) {
+        const n = toNumber(val);
+        if (it.edtwrd) return editWord(n, it.edtwrd, it.dec || 0);
+        if (it.edtcde) return ec(n, it.edtcde, it.rpgType);
+        const dig = it.len;
+        const s2 = String(Math.round(Math.abs(n) * 10 ** (it.dec || 0))).padStart(dig, '0').slice(-dig);
+        return n < 0 ? s2.slice(0, -1) + '}JKLMNOPQR'[Number(s2.slice(-1))] : s2;
+      }
+      return toStr(val).padEnd(it.len || 0).slice(0, it.len || undefined);
+    };
+    // Control de impresión del formato: saltos y espacios antes
+    const skipB = ctlOf(fmt.ctl, 'SKIPB');
+    const spaceB = ctlOf(fmt.ctl, 'SPACEB');
+    if (skipB) prt.skipTo(skipB);
+    if (spaceB) prt.space(spaceB);
+    let buf = '';
+    let lastEnd = 0;
+    let curLine = null;
+    const flush = () => { if (buf) prt.print(buf); buf = ''; lastEnd = 0; };
+    for (const it of fmt.items) {
+      if (!on(it.cond)) continue;
+      if (it.line && it.line !== curLine) {
+        // Posición de línea absoluta en la página
+        flush();
+        prt.skipTo(it.line);
+        curLine = it.line;
+      }
+      const fs = ctlOf(it.ctl, 'SKIPB');
+      const fsp = ctlOf(it.ctl, 'SPACEB');
+      if (fs || fsp) { flush(); if (fs) prt.skipTo(fs); if (fsp) prt.space(fsp); }
+      const text = await textOf(it);
+      const start = it.pos && it.pos.abs ? it.pos.abs : lastEnd + 1 + ((it.pos && it.pos.rel) || 0);
+      if (buf.length < start - 1) buf = buf.padEnd(start - 1);
+      buf = buf.slice(0, start - 1) + text + buf.slice(start - 1 + text.length);
+      lastEnd = start - 1 + text.length;
+      const fsa = ctlOf(it.ctl, 'SPACEA');
+      const fka = ctlOf(it.ctl, 'SKIPA');
+      if (fsa !== undefined || fka) { flush(); if (fsa) prt.space(fsa); if (fka) prt.skipTo(fka); }
+    }
+    flush();
+    const spaceA = ctlOf(fmt.ctl, 'SPACEA');
+    const skipA = ctlOf(fmt.ctl, 'SKIPA');
+    if (skipA) prt.skipTo(skipA);
+    if (spaceA !== undefined) prt.space(spaceA);
+    else if (!skipA && !skipB && !spaceB && !fmt.items.some((i) => i.line)) prt.space(1);
+    return null;
   }
 
   // Impresora paginada (una por archivo PRINTER abierto)

@@ -267,6 +267,35 @@ def('CVTRPGSRC', 'Convert RPG Source', [
 compileDef('CRTCLPGM', 'Create CL Program', 'CLP', 'PGM', 'QCLSRC');
 compileDef('CRTPF', 'Create Physical File', 'PF', 'FILE', 'QDDSSRC', [P('REPLACE', 'Replace file', 'char', 4, { dft: '*NO', choices: '*NO, *YES' })]);
 compileDef('CRTDSPF', 'Create Display File', 'DSPF', 'FILE', 'QDDSSRC');
+compileDef('CRTLF', 'Create Logical File', 'LF', 'FILE', 'QDDSSRC');
+def('CRTPRTF', 'Create Printer File', [
+  LIBQ('FILE', 'File', { lib: '*CURLIB', libChoices: 'Name, *CURLIB' }),
+  LIBQ('SRCFILE', 'Source file', { req: false, dft: 'QDDSSRC' }),
+  P('SRCMBR', 'Source member', 'name', 10, { dft: '*FILE', choices: 'Name, *FILE' }),
+  P('PAGESIZE', 'Page size (length width)', 'list', 12, { dft: '66 132' }),
+  P('OVRFLW', 'Overflow line number', 'int', 3, { dft: '60' }),
+  P('REPLACE', 'Replace file', 'char', 4, { dft: '*YES', choices: '*YES, *NO' }),
+  TEXT,
+], async (ctx, a) => {
+  const ps = String(a.PAGESIZE || '66 132').replace(/[()]/g, ' ').trim().split(/\s+/).map(Number);
+  return compileObject(ctx, {
+    type: 'PRTF', obj: a.FILE, srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE !== '*NO',
+    pagesize: [ps[0] || 66, ps[1] || 132], ovrflw: Number(a.OVRFLW || 60),
+  });
+});
+def('DSPDBR', 'Display Database Relations', [LIBQ('FILE', 'File')], async (ctx, a) => {
+  const lib = await resolveLibOf(ctx, a.FILE, '*FILE');
+  const deps = await obj.dependentLogicals(lib, a.FILE.obj);
+  const lines = [`File  . . . . . . . . . . :   ${a.FILE.obj}`, `  Library . . . . . . . . :   ${lib}`, `Number of dependent files :   ${deps.length}`, '', 'Dependent File    Library     Dependency', ...deps.map((d) => `${d.NAME.padEnd(18)}${d.LIB.padEnd(12)}Data`)];
+  if (!ctx.interactive) return { text: lines.join('\n') };
+  const p = new Panel({ fn: 'CMD-DSPDBR', keys: ['F3', 'F12'] });
+  p.title('Display Data Base Relations');
+  p.sysName();
+  lines.forEach((l, i) => p.text(3 + i, 2, l, i < 3 ? 'g' : 'w'));
+  p.fkeys('F3=Exit   F12=Cancel');
+  await ctx.display(p);
+  return null;
+});
 
 // ---------- Ejecución de programas y trabajos ----------
 def('CALL', 'Call Program', [LIBQ('PGM', 'Program'), P('PARM', 'Parameters', 'list', 60, { lc: true })], async (ctx, a, info) => {
