@@ -124,7 +124,7 @@ export async function writeQsysMember(lib, file, mbr, text, { append = false, sr
   const lines = String(text).replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
   if (kind === 'SRC') {
     if (!(await obj.findMember(gw, lib, file, mbr, []))) {
-      const type = srctype || ({ QRPGLESRC: 'RPGLE', QCLLESRC: 'CLLE', QCLSRC: 'CLP', QDDSSRC: 'PF', QSQLSRC: 'SQL', QTXTSRC: 'TXT' }[file] || 'TXT');
+      const type = srctype || ({ QRPGLESRC: 'RPGLE', QRPGSRC: 'RPG', QS36SRC: 'RPG36', QCLLESRC: 'CLLE', QCLSRC: 'CLP', QDDSSRC: 'PF', QSQLSRC: 'SQL', QTXTSRC: 'TXT' }[file] || 'TXT');
       await obj.addMember(lib, file, mbr, type, '');
     }
     let existing = append ? await readMember(gw, lib, file, mbr) : [];

@@ -193,7 +193,7 @@ def('RMVM', 'Remove Member', [LIBQ('FILE', 'Database file'), P('MBR', 'Member', 
 def('STRSEU', 'Start Source Entry Utility', [
   LIBQ('SRCFILE', 'Source file', { req: false, dft: 'QRPGLESRC' }),
   P('SRCMBR', 'Source member', 'name', 10, { req: true }),
-  P('TYPE', 'Source type', 'name', 10, { dft: '*SAME', choices: 'Name, *SAME, RPGLE, CLLE, PF, DSPF' }),
+  P('TYPE', 'Source type', 'name', 10, { dft: '*SAME', choices: 'Name, *SAME, RPGLE, SQLRPGLE, RPG, RPG38, RPG36, CLLE, CLP, PF, LF, DSPF, PRTF' }),
   P('OPTION', 'Option', 'char', 1, { dft: '2', choices: '2=Edit, 5=Browse' }),
   P('TEXT', "Text 'description'", 'text', 50, { dft: '*BLANK' }),
 ], async (ctx, a) => {
@@ -201,7 +201,7 @@ def('STRSEU', 'Start Source Entry Utility', [
   let type = a.TYPE;
   if (type === '*SAME') {
     const m = await obj.findMember(gw, lib, a.SRCFILE.obj, a.SRCMBR, []);
-    type = m ? m.TYPE : ({ QRPGLESRC: 'RPGLE', QCLLESRC: 'CLLE', QCLSRC: 'CLP', QDDSSRC: 'PF', QSQLSRC: 'SQL' }[a.SRCFILE.obj] || 'TXT');
+    type = m ? m.TYPE : ({ QRPGLESRC: 'RPGLE', QRPGSRC: 'RPG', QS36SRC: 'RPG36', QCLLESRC: 'CLLE', QCLSRC: 'CLP', QDDSSRC: 'PF', QSQLSRC: 'SQL' }[a.SRCFILE.obj] || 'TXT');
   }
   return seu(ctx, { lib, file: a.SRCFILE.obj, mbr: a.SRCMBR, type, mode: a.OPTION === '5' ? 'browse' : 'edit', text: textVal(a.TEXT) });
 }, I);
@@ -225,9 +225,45 @@ const compileDef = (name, title, type, kw = 'PGM', srcDft = 'QRPGLESRC', extra =
   type: type || null, obj: a[kw], srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE === '*YES',
 }));
 compileDef('CRTBNDRPG', 'Create Bound RPG Program', 'RPGLE');
-compileDef('CRTRPGPGM', 'Create RPG Program', 'RPGLE', 'PGM', 'QRPGSRC');
+compileDef('CRTRPGPGM', 'Create RPG Program', 'RPG', 'PGM', 'QRPGSRC');
 compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ');
 compileDef('CRTBNDCL', 'Create Bound CL Program', 'CLLE', 'PGM', 'QCLLESRC');
+
+// CVTRPGSRC: RPG III / RPG/400 / RPG II → ILE RPG (RPG IV) en columnas fijas
+def('CVTRPGSRC', 'Convert RPG Source', [
+  LIBQ('FROMFILE', 'From file', { dft: 'QRPGSRC' }),
+  P('FROMMBR', 'From member', 'name', 10, { req: true, choices: 'Name, generic*, *ALL' }),
+  LIBQ('TOFILE', 'To file', { req: false, dft: 'QRPGLESRC', lib: '*FROMLIB' }),
+  P('TOMBR', 'To member', 'name', 10, { dft: '*FROMMBR', choices: 'Name, *FROMMBR' }),
+  P('EXPCPY', 'Expand copy member', 'char', 4, { dft: '*NO', choices: '*NO, *YES' }),
+  P('LOGFILE', 'Log file', 'name', 10, { dft: '*NONE' }),
+], async (ctx, a) => {
+  const { cvtrpgsrc } = await import('../../../../shared/rpg/cvtrpgsrc.js');
+  const fromLib = await resolveLibOf(ctx, a.FROMFILE, '*FILE');
+  const toLib = !a.TOFILE.lib || a.TOFILE.lib === '*FROMLIB' || a.TOFILE.lib === '*LIBL' ? fromLib : ctx.resolveLib(a.TOFILE.lib);
+  const toFile = a.TOFILE.obj || 'QRPGLESRC';
+  if (!(await obj.findObject(gw, toFile, '*FILE', toLib, []))) throw new CLError('CPF9812', toFile, toLib);
+  const all = await obj.listMembers(fromLib, a.FROMFILE.obj);
+  const pat = String(a.FROMMBR).toUpperCase();
+  const mbrs = pat === '*ALL' ? all : pat.endsWith('*') ? all.filter((m) => m.MBR.startsWith(pat.slice(0, -1))) : all.filter((m) => m.MBR === pat);
+  if (!mbrs.length) throw new CLError('CPF9815', a.FROMMBR, a.FROMFILE.obj, fromLib);
+  const TYPE_MAP = { RPG: 'RPGLE', RPG38: 'RPGLE', RPG36: 'RPGLE', RPT: 'RPGLE', RPT38: 'RPGLE', SQLRPG: 'SQLRPGLE', '': 'RPGLE' };
+  let done = 0;
+  for (const m of mbrs) {
+    const type = String(m.TYPE || '').toUpperCase();
+    if (!(type in TYPE_MAP)) { logJob(ctx.job, 'CPF5D03', '*DIAG', `Member ${m.MBR} not converted: source type ${type} is not RPG.`, { sev: 10 }); continue; }
+    const toMbr = a.TOMBR === '*FROMMBR' || !a.TOMBR ? m.MBR : a.TOMBR;
+    const src = await obj.readMember(gw, fromLib, a.FROMFILE.obj, m.MBR);
+    const { lines } = cvtrpgsrc(src.map((x) => x.text), { name: m.MBR });
+    const existing = await obj.listMembers(toLib, toFile);
+    if (existing.some((x) => x.MBR === toMbr)) throw new CLError('CPF3213', toMbr, toFile, toLib);
+    await obj.addMember(toLib, toFile, toMbr, TYPE_MAP[type], m.TEXT || '');
+    await obj.writeMember(toLib, toFile, toMbr, lines.map((t, i) => ({ seq: (i + 1) * 100, dat: 0, text: t })));
+    logJob(ctx.job, '', '*INFO', `Member ${m.MBR} converted to ${toLib}/${toFile}(${toMbr}).`);
+    done++;
+  }
+  return { text: `${done} members converted out of ${mbrs.length} attempted.` };
+});
 compileDef('CRTCLPGM', 'Create CL Program', 'CLP', 'PGM', 'QCLSRC');
 compileDef('CRTPF', 'Create Physical File', 'PF', 'FILE', 'QDDSSRC', [P('REPLACE', 'Replace file', 'char', 4, { dft: '*NO', choices: '*NO, *YES' })]);
 compileDef('CRTDSPF', 'Create Display File', 'DSPF', 'FILE', 'QDDSSRC');

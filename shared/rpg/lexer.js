@@ -1,5 +1,5 @@
 // Lexer de RPG IV (ILE RPG) en formato libre, con soporte de columnas fijas convertido a libre.
-import { convertFixed } from './fixed.js';
+import { convertFixed, splitCtdata } from './fixed.js';
 import { TO_UNI } from '../ebcdic.js';
 
 export class CompileError extends Error {
@@ -17,26 +17,33 @@ const NON_OPERAND_WORDS = new Set([
   'DSPLY', 'FOR', 'TO', 'BY', 'DOWNTO', 'CHAIN', 'SETLL', 'SETGT', 'READE', 'READPE', 'DELETE',
   'CLEAR', 'RESET', 'CLOSE', 'INZ', 'EVAL-CORR', 'ON-ERROR', 'SORTA', 'DCL-PI', 'DCL-PR', 'DCL-DS',
   'DCL-S', 'DCL-C', 'CONST', 'LIKE', 'END-PI', 'END-PR', 'END-DS', 'OTHER', 'ENDIF',
+  'MOVE$', 'MOVEL$', 'MOVEA$', 'MOVE$P', 'MOVEL$P', 'MOVEA$P', 'GOTO$', 'TAG$', 'CALL$', 'EXCEPT', 'IN$', 'OUT$',
+  '$TEST$', '$BITON$', '$BITOFF$', 'ELSE', 'SELECT', 'READ', 'WRITE', 'UPDATE', 'EXFMT',
 ]);
 
 /**
  * Prepara las líneas de un miembro fuente: detecta **FREE, columnas fijas, comentarios y directivas.
  * Devuelve [{text, line}] donde line es el índice (base 1) del registro fuente.
  */
-export function preprocess(srcLines, includeResolver) {
+export function preprocess(srcLines, includeResolver, { dialect = 'RPG4' } = {}) {
+  // Datos de tiempo de compilación (** / **CTDATA nombre) al final del fuente
+  const { src, blocks } = splitCtdata(srcLines);
+  srcLines = expandFixedIncludes(src, includeResolver, 0);
   const out = [];
-  const first = (srcLines[0] || '').trim().toUpperCase();
+  const first = String(itemText(srcLines[0])).trim().toUpperCase();
   const fullyFree = first.startsWith('**FREE');
   let inFree = false;
   const fixedBuf = [];
   const flushFixed = () => {
     if (!fixedBuf.length) return;
-    for (const l of convertFixed(fixedBuf)) out.push(l);
+    for (const l of convertFixed(fixedBuf, { dialect })) out.push(l);
     fixedBuf.length = 0;
   };
+  const specs = dialect === 'RPG3' ? 'HFELICO' : 'HFDCPIO';
   for (let i = 0; i < srcLines.length; i++) {
-    const raw = (srcLines[i] || '').replace(/\s+$/, '');
-    const lineNo = i + 1;
+    const item = srcLines[i];
+    const lineNo = item && typeof item === 'object' ? item.line : i + 1;
+    const raw = String(itemText(item)).replace(/\s+$/, '');
     if (fullyFree) {
       if (i === 0) continue;
       const d = raw.trim().toUpperCase();
@@ -60,19 +67,51 @@ export function preprocess(srcLines, includeResolver) {
       if (/^\/(COPY|INCLUDE)\s+/.test(directive)) { out.push(...expandInclude(line.slice(6).trim(), lineNo, includeResolver)); continue; }
       continue;
     }
-    if (inFree || spec === ' ') {
+    if (inFree || (spec === ' ' && dialect !== 'RPG3')) {
       flushFixed();
       const code = inFree ? line.slice(7) : line.slice(7, 80);
       if (code.trim()) out.push({ text: code, line: lineNo });
       continue;
     }
-    if ('HFDCPIO'.includes(spec)) {
+    if (specs.includes(spec)) {
       fixedBuf.push({ text: line, line: lineNo });
       continue;
     }
+    if (dialect === 'RPG3' && (spec === ' ' || spec === 'U')) continue; // RPG II: líneas sin especificación / auto-report
     throw new CompileError('RNF0257', `Form-type ${spec} not valid or out of sequence.`, lineNo);
   }
   flushFixed();
+  const last = srcLines.length;
+  for (const b of blocks) out.push({ text: `$CTDATA '${Buffer.from(JSON.stringify(b)).toString('base64')}';`, line: last });
+  return out;
+}
+
+const itemText = (x) => (x && typeof x === 'object' ? x.text : x ?? '');
+
+// /COPY de miembros en columnas fijas: se sustituyen textualmente (como hace el compilador) antes de convertir.
+function expandFixedIncludes(lines, resolver, depth) {
+  const first = String(itemText(lines[0])).trim().toUpperCase();
+  if (first.startsWith('**FREE') || depth > 16) return lines;
+  const out = [];
+  lines.forEach((raw, i) => {
+    const item = raw && typeof raw === 'object' ? raw : { text: String(raw ?? ''), line: i + 1 };
+    const l = item.text.padEnd(80);
+    const d = l.slice(6).trim().toUpperCase();
+    if (l[6] === '/' && /^\/(COPY|INCLUDE)\s+/.test(d) && resolver) {
+      const m = /^\/(?:COPY|INCLUDE)\s+(?:([\w#@$]+)\/)?(?:([\w#@$]+),)?([\w#@$]+)/i.exec(d);
+      const mem = m && resolver({ lib: m[1], file: m[2] || 'QRPGLESRC', member: m[3] });
+      if (!mem) throw new CompileError('RNF0300', `The /COPY member ${m ? m[3] : ''} was not found.`, item.line);
+      if (String(mem[0] || '').trim().toUpperCase().startsWith('**FREE')) {
+        out.push({ text: '      /FREE', line: item.line });
+        for (const x of mem.slice(1)) out.push({ text: '       ' + x, line: item.line });
+        out.push({ text: '      /END-FREE', line: item.line });
+      } else {
+        for (const x of expandFixedIncludes(mem, resolver, depth + 1)) out.push({ text: itemText(x), line: item.line });
+      }
+      return;
+    }
+    out.push(item);
+  });
   return out;
 }
 
@@ -81,7 +120,8 @@ function expandInclude(directive, lineNo, resolver) {
   if (!m || !resolver) throw new CompileError('RNF0300', `The /COPY or /INCLUDE member was not found.`, lineNo);
   const lines = resolver({ lib: m[1], file: m[2] || 'QRPGLESRC', member: m[3] });
   if (!lines) throw new CompileError('RNF0300', `The /COPY member ${m[3]} was not found.`, lineNo);
-  return preprocess(['**FREE', ...lines]).map((l) => ({ text: l.text, line: lineNo }));
+  const free = String(lines[0] || '').trim().toUpperCase().startsWith('**FREE');
+  return preprocess(free ? lines : ['**FREE', ...lines]).map((l) => ({ text: l.text, line: lineNo }));
 }
 
 export function tokenize(lines) {

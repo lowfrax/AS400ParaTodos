@@ -8,8 +8,8 @@ import { refreshMW } from '../mw.js';
 
 const COMPILER = process.env.COMPILER_URL || 'http://localhost:5251';
 
-const SRC_FOR = { RPGLE: 'QRPGLESRC', SQLRPGLE: 'QRPGLESRC', CLLE: 'QCLLESRC', CLP: 'QCLSRC', PF: 'QDDSSRC', DSPF: 'QDDSSRC' };
-export const COMPILE_CMD = { RPGLE: 'CRTBNDRPG', SQLRPGLE: 'CRTSQLRPGI', RPG: 'CRTBNDRPG', CLLE: 'CRTBNDCL', CLP: 'CRTBNDCL', PF: 'CRTPF', DSPF: 'CRTDSPF' };
+const SRC_FOR = { RPGLE: 'QRPGLESRC', SQLRPGLE: 'QRPGLESRC', RPG: 'QRPGSRC', RPG38: 'QRPGSRC', RPG36: 'QS36SRC', CLLE: 'QCLLESRC', CLP: 'QCLSRC', PF: 'QDDSSRC', LF: 'QDDSSRC', DSPF: 'QDDSSRC', PRTF: 'QDDSSRC' };
+export const COMPILE_CMD = { RPGLE: 'CRTBNDRPG', SQLRPGLE: 'CRTSQLRPGI', RPG: 'CRTRPGPGM', RPG38: 'CRTRPGPGM', RPG36: 'CRTRPGPGM', CLLE: 'CRTBNDCL', CLP: 'CRTCLPGM', PF: 'CRTPF', LF: 'CRTLF', DSPF: 'CRTDSPF', PRTF: 'CRTPRTF' };
 
 /**
  * Compila un miembro fuente y crea el objeto.
@@ -22,7 +22,9 @@ export async function compileObject(ctx, o) {
   const mbrName = !o.srcmbr || o.srcmbr === '*PGM' || o.srcmbr === '*FILE' || o.srcmbr === '*OBJ' ? name : o.srcmbr;
   const mi = await findMember(gw, o.srcfile.lib === '*LIBL' ? null : ctx.resolveLib(o.srcfile.lib), srcfile, mbrName, ctx.libl);
   if (!mi) throw new CLError('CPF9815', mbrName, srcfile, o.srcfile.lib);
-  const type = (o.type || mi.TYPE || 'RPGLE').toUpperCase();
+  // CRTRPGPGM compila RPG/400 (RPG), RPG/38 y RPG II (RPG36) según el tipo del miembro
+  const opm = ['RPG', 'RPG38', 'RPG36'];
+  const type = (o.type === 'RPG' ? (opm.includes(String(mi.TYPE).toUpperCase()) ? mi.TYPE : 'RPG') : o.type || mi.TYPE || 'RPGLE').toUpperCase();
   const source = await readMember(gw, mi.LIB, srcfile, mbrName);
   const text = o.text && o.text !== '*SRCMBRTXT' ? o.text : mi.TEXT || '';
   // Como en IBM i, CRTPF comprueba antes de compilar si el archivo ya existe: CPF5813 (diagnóstico) + CPF7302 (escape).

@@ -5,6 +5,8 @@ import {
   toDate, toTime, toTimestamp, fmtDate, addDuration, diffDates, dateToJs, editc, figValue,
 } from './types.js';
 
+import { runCycle, outputRecords, Printer, loadCtdata, zonedToNumber, zonedText } from './cycle.js';
+
 export { RpgError };
 export class RpgCancel extends Error {
   constructor(msg = 'Request ended.') { super(msg); this.cancel = true; }
@@ -33,7 +35,9 @@ export class RpgProgram {
     this.globals = new Scope(null);
     this.ind = {};
     for (let i = 1; i <= 99; i++) this.ind[String(i).padStart(2, '0')] = '0';
-    for (const k of ['LR', 'RT', 'H1', 'U1', 'U2', ...FKEY_IND]) this.ind[k] = '0';
+    for (const k of ['LR', 'RT', 'MR', '1P', 'OF', 'OV', ...'ABCDEFG'.split('').map((x) => 'O' + x),
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((i) => [`L${i}`, `H${i}`, `U${i}`]), ...FKEY_IND]) this.ind[k] = '0';
+    this.dtaMap = new Map();
     this.files = new Map();
     this.formats = new Map();
     this.cursors = new Map();
@@ -56,6 +60,11 @@ export class RpgProgram {
     g.vars.set('SQLERRD', { kind: 's', name: 'SQLERRD', type: { t: 'int', bits: 32 }, dim: 6, value: [0, 0, 0, 0, 0, 0] });
     for (const f of this.ir.files) await this.openFile(f, g);
     for (const d of this.ir.decls) await this.declare(d, g);
+    // Campos especiales de página de las O-specs
+    if ((this.ir.ospecs || []).length) {
+      for (const n of ['PAGE', 'PAGE1', 'PAGE2', 'PAGE3', 'PAGE4', 'PAGE5', 'PAGE6', 'PAGE7']) this.ensureVar(g, n, { t: 'zoned', digits: 4, dec: 0 });
+    }
+    loadCtdata(this);
     this.activated = true;
   }
 
@@ -66,7 +75,8 @@ export class RpgProgram {
       const desc = await this.host.describeFile(f.extfile || f.name);
       ent.desc = desc;
       ent.h = this.host.openDisk(desc, f);
-      for (const fld of desc.fields) this.ensureVar(scope, pfx(fld.name), fld.type);
+      const info = (this.ir.filex || {})[f.name];
+      if (!info || !info.progDesc) for (const fld of desc.fields) this.ensureVar(scope, pfx(fld.name), fld.type);
       const fmt = f.rename[desc.format] || desc.format;
       this.formats.set(fmt, ent);
       ent.formats = [fmt];
@@ -81,10 +91,32 @@ export class RpgProgram {
       ent.sfl = {};
       for (const [fmtName, rrnVar] of Object.entries(f.sfile)) ent.sfl[fmtName] = { rrnVar, records: [] };
     } else if (f.device === 'PRINTER') {
-      ent.h = this.host.openPrinter(f.name, f.prtlen || 132);
+      const info = (this.ir.filex || {})[f.name] || {};
+      ent.prtInfo = { formlen: f.formlen || info.formlen || 66, ofl: f.formofl || info.formofl || 60, width: f.prtlen || 132, ind: (f.oflind || info.ofl || '').toUpperCase() };
+      ent.h = this.host.openPrinter(f.name, f.prtlen || 132, { pageLen: ent.prtInfo.formlen });
       ent.formats = [f.name];
     }
     this.files.set(f.name, ent);
+  }
+
+  // Impresora paginada (una por archivo PRINTER abierto)
+  printerFor(ent) {
+    if (!ent.prt) {
+      const pi = ent.prtInfo || {};
+      ent.prt = new Printer(ent.h, { formlen: pi.formlen, ofl: pi.ofl, width: pi.width, onOverflow: () => { if (pi.ind) this.ind[pi.ind] = '1'; } });
+    }
+    return ent.prt;
+  }
+
+  overflowInds() {
+    const out = [];
+    for (const ent of this.files.values()) if (ent.prtInfo && ent.prtInfo.ind && !out.includes(ent.prtInfo.ind)) out.push(ent.prtInfo.ind);
+    return out;
+  }
+
+  get isCycle() {
+    const ir = this.ir;
+    return Object.values(ir.filex || {}).some((x) => x.desig === 'P' || x.desig === 'S') || (ir.ospecs || []).length > 0 || (ir.totals || []).length > 0 || (ir.ispecs || []).length > 0;
   }
 
   ensureVar(scope, name, type) {
@@ -233,8 +265,10 @@ export class RpgProgram {
           this.inzDone = true;
           await this.execList(this.ir.subrs['*INZSR'], this.globals, fr);
         }
-        for (;;) {
+        if (this.isCycle) await runCycle(this, fr);
+        else for (;;) {
           const sig = await this.execList(this.ir.main, this.globals, fr);
+          if (sig && sig.s === 'goto') throw new RpgError('00202', 'RNX9999', `TAG ${sig.label} not found for GOTO.`);
           if (sig && sig.s === 'return') break;
           if (this.ind.LR === '1') break;
           // Ciclo RPG: sin *INLR ni RETURN, los cálculos se repiten.
@@ -252,6 +286,8 @@ export class RpgProgram {
     } finally {
       for (const [v, ref] of bound) ref.set(v.value);
     }
+    // La salida impresa de esta llamada se cierra (página parcial incluida) antes de volver
+    for (const ent of this.files.values()) if (ent.prt) { ent.prt.close(); ent.prt = null; }
     if (this.ind.LR === '1') await this.closeAll();
     return { lr: this.ind.LR === '1' };
   }
@@ -269,9 +305,16 @@ export class RpgProgram {
   }
 
   async execList(stmts, sc, fr) {
-    for (const s of stmts) {
-      const sig = await this.exec(s, sc, fr);
-      if (sig) return sig;
+    for (let i = 0; i < stmts.length; i++) {
+      const sig = await this.exec(stmts[i], sc, fr);
+      if (sig) {
+        // GOTO: se busca el TAG en esta lista; si no está, la señal sube a la lista que la contiene
+        if (sig.s === 'goto') {
+          const j = stmts.findIndex((x) => x.op === 'tag' && x.label === sig.label);
+          if (j >= 0) { i = j; await this.tick(); continue; }
+        }
+        return sig;
+      }
     }
     return null;
   }
@@ -280,7 +323,28 @@ export class RpgProgram {
     this.line = s.line;
     await this.tick();
     switch (s.op) {
-      case 'nop': return null;
+      case 'nop': case 'tag': return null;
+      case 'goto': return { s: 'goto', label: s.label };
+      case 'except': await outputRecords(this, ['E'], s.name || ''); return null;
+      case 'movea': return this.moveA(s, sc);
+      case 'dtadef': this.dtaMap.set(s.name, s.ext); return null;
+      case 'dtain': case 'dtaout': return this.dtaIO(s, sc);
+      case 'test': {
+        const ref = await this.place(s.target, sc);
+        const v = ref.get();
+        const kind = String(s.ext || '').toUpperCase().includes('T') ? 'time' : String(s.ext || '').toUpperCase().includes('Z') ? 'timestamp' : 'date';
+        const fmt = toStr(await this.ev(s.fmt, sc)).trim() || undefined;
+        if (kind === 'date') toDate(v, fmt); else if (kind === 'time') toTime(v, fmt); else toTimestamp(v);
+        return null;
+      }
+      case 'bit': {
+        const ref = await this.place(s.target, sc);
+        const cur = toStr(ref.get());
+        let code = cur.charCodeAt(0) || 0x40;
+        for (const ch of String(s.bits)) { if (!/[0-7]/.test(ch)) continue; const mask = 0x80 >> Number(ch); code = s.on ? code | mask : code & ~mask; }
+        ref.set(String.fromCharCode(code) + cur.slice(1));
+        return null;
+      }
       case 'assign': return this.assign(s, sc);
       case 'callp': {
         if (s.e) return this.withE(() => this.ev(s.call, sc, { stmt: true }));
@@ -365,7 +429,11 @@ export class RpgProgram {
         return null;
       }
       case 'dsply': {
-        const text = s.msg ? toStr(await this.ev(s.msg, sc)) : '';
+        let text = '';
+        if (s.msg) {
+          const { v, t } = await this.typed(s.msg, sc);
+          text = t && (t.t === 'packed' || t.t === 'zoned') && typeof v === 'number' ? numToChar(v, t.dec || 0) : toStr(v);
+        }
         if (s.resp) {
           const ref = await this.place(s.resp, sc);
           const reply = await this.host.dsply(text, true, ref.type ? charLen(ref.type) : 52);
@@ -389,23 +457,36 @@ export class RpgProgram {
       }
       case 'move': {
         const ref = await this.place(s.target, sc);
-        const src = await this.ev(s.src, sc);
-        if (ref.type && isCharType(ref.type)) {
-          const cur = toStr(ref.get());
-          const sv = toStr(src);
-          const len = cur.length;
-          let res;
-          if (s.left) res = sv.length >= len ? sv.slice(0, len) : sv + cur.slice(sv.length);
-          else res = sv.length >= len ? sv.slice(sv.length - len) : cur.slice(0, len - sv.length) + sv;
-          ref.set(res);
-        } else ref.set(typeof src === 'string' ? toNumber(src.trim() || 0) : src);
+        const { v: src, t: st } = await this.typed(s.src, sc);
+        const tt = ref.type || { t: 'char', len: toStr(ref.get()).length };
+        if (tt.t === 'date' || tt.t === 'time' || tt.t === 'timestamp') { ref.set(coerce(tt, typeof src === 'number' ? String(src) : toStr(src))); return null; }
+        // Representación en caracteres de origen y destino (los numéricos como dígitos con zona de signo)
+        const srcText = isFig(src) ? null : (st && isNumType(st)) || typeof src === 'number' ? zonedText(src, st && isNumType(st) ? st : { t: 'zoned', digits: String(Math.trunc(Math.abs(toNumber(src)))).length + 0, dec: 0 }) : toStr(src);
+        if (srcText === null) { ref.set(src); return null; }
+        const tgtNum = isNumType(tt);
+        const len = tgtNum ? (tt.digits || charLen(tt)) : charLen(tt) || toStr(ref.get()).length;
+        const cur = tgtNum ? zonedText(ref.get(), tt) : toStr(ref.get()).padEnd(len).slice(0, len);
+        const padCh = tgtNum ? '0' : ' ';
+        let res;
+        if (s.left) {
+          if (srcText.length >= len) res = srcText.slice(0, len);
+          else res = srcText + (s.pad ? padCh.repeat(len - srcText.length) : cur.slice(srcText.length));
+        } else if (srcText.length >= len) res = srcText.slice(srcText.length - len);
+        else res = (s.pad ? padCh.repeat(len - srcText.length) : cur.slice(0, len - srcText.length)) + srcText;
+        if (tgtNum) {
+          // MOVEL a numérico: el signo lo da el origen si es numérico
+          let n = zonedToNumber(res, tt.dec || 0);
+          if (s.left && st && isNumType(st)) n = Math.abs(n) * (toNumber(src) < 0 ? -1 : 1);
+          ref.set(n);
+        } else ref.set(tt.t === 'varchar' ? res.replace(/\s+$/, '') : res);
         return null;
       }
       case 'callpgm': {
         const name = toStr(await this.ev(s.pgm, sc)).trim().toUpperCase();
         const refs = [];
         for (const p of s.parms) refs.push(await this.place(p, sc));
-        await this.host.callProgram(name, refs);
+        const r = await this.host.callProgram(name, refs);
+        this.lastCallLR = !!(r && r.lr);
         return null;
       }
       case 'file': return this.fileOp(s, sc);
@@ -661,9 +742,11 @@ export class RpgProgram {
         if (e.name === 'UYEAR') return t.getFullYear() % 100;
         if (e.name === 'UMONTH') return t.getMonth() + 1;
         if (e.name === 'UDAY') return t.getDate();
+        if (e.name === '$CALLLR$') return this.lastCallLR ? '1' : '0';
         throw new RpgError('00202', 'RNF7030', `The name or indicator ${e.name} is not defined.`);
       }
       case 'call': {
+        if (/^\$[A-Z]+\$$/.test(e.name)) return this.internal(e, sc);
         const v = sc.lookup(e.name);
         if (v && (v.kind === 's' || v.kind === 'ds') && (v.dim || Array.isArray(v.inst))) {
           const p = await this.place(e, sc);
@@ -694,6 +777,109 @@ export class RpgProgram {
         }
       }
       default: throw new RpgError('00202', 'RNX9999', `Expression kind ${e.k} not supported.`);
+    }
+  }
+
+  // Funciones auxiliares generadas por el conversor de columnas fijas
+  async internal(e, sc) {
+    const a = e.args;
+    switch (e.name) {
+      case '$NUM$': { const { v, t } = await this.typed(a[0], sc); return t && isNumType(t) ? toNumber(v) : zonedToNumber(toStr(v), 0); }
+      case '$ZB$': { const { v, t } = await this.typed(a[0], sc); return t && isNumType(t) ? toNumber(v) === 0 : !toStr(v).trim(); }
+      case '$TIME$': {
+        const len = Math.trunc(toNumber(await this.ev(a[0], sc)));
+        const d = new Date();
+        const hms = Number(`${d.getHours()}`.padStart(2, '0') + `${d.getMinutes()}`.padStart(2, '0') + `${d.getSeconds()}`.padStart(2, '0'));
+        const mdy = Number(`${d.getMonth() + 1}`.padStart(2, '0') + `${d.getDate()}`.padStart(2, '0') + `${d.getFullYear()}`);
+        return len >= 12 ? Number(`${hms}`.padStart(6, '0') + `${mdy}`.padStart(len >= 14 ? 8 : 6, '0').slice(len >= 14 ? 0 : 2)) : hms;
+      }
+      case '$TESTN$': {
+        const v = toStr(await this.ev(a[0], sc));
+        if (/^\d+$/.test(v)) return 1;
+        if (/^ +\d+$/.test(v)) return 2;
+        return 0;
+      }
+      case '$TESTB$': {
+        const bits = toStr(await this.ev(a[0], sc));
+        const code = toStr(await this.ev(a[1], sc)).charCodeAt(0) || 0;
+        const sel = [...bits].filter((c) => /[0-7]/.test(c)).map((c) => (code & (0x80 >> Number(c))) !== 0);
+        if (sel.every((x) => !x)) return 0;
+        if (sel.every((x) => x)) return 2;
+        return 1;
+      }
+      default: throw new RpgError('00202', 'RNX9999', `Internal function ${e.name} not supported.`);
+    }
+  }
+
+  // MOVEA: mueve bytes entre arrays y campos de forma contigua
+  async moveA(s, sc) {
+    const flat = (v, t) => (Array.isArray(v) ? v.map((x) => (t && isNumType(t) ? zonedText(x, t) : toStr(x).padEnd(charLen(t || { t: 'char', len: 1 })).slice(0, charLen(t || { t: 'char', len: 1 })))).join('') : (t && isNumType(t) ? zonedText(v, t) : toStr(v)));
+    let src;
+    if (s.src.k === 'all') src = { all: s.src.v };
+    else { const { v, t } = await this.typed(s.src, sc); src = isFig(v) ? v : flat(v, t); }
+    let tgt = s.target;
+    let start = 1;
+    if (tgt.k === 'call' && tgt.args && tgt.args.length === 1) {
+      const base = sc.lookup(tgt.name);
+      if (base && base.dim) { start = Math.trunc(toNumber(await this.ev(tgt.args[0], sc))); tgt = { k: 'id', name: tgt.name }; }
+    }
+    const ref = await this.place(tgt, sc);
+    const v = ref.var && ref.var.dim ? ref.var : null;
+    if (v) {
+      const el = isNumType(v.type) ? v.type.digits : charLen(v.type);
+      const arr = v.value.slice();
+      const totalLen = (arr.length - start + 1) * el;
+      let text = isFig(src) ? null : typeof src === 'object' && src.all !== undefined ? String(src.all).repeat(Math.ceil(totalLen / Math.max(1, String(src.all).length))).slice(0, totalLen) : src;
+      if (text === null) { for (let i = start - 1; i < arr.length; i++) arr[i] = coerce(v.type, src); v.value = arr; return null; }
+      let pos = 0;
+      for (let i = start - 1; i < arr.length && (pos < text.length || s.pad); i++) {
+        const curText = isNumType(v.type) ? zonedText(arr[i], v.type) : toStr(arr[i]).padEnd(el).slice(0, el);
+        let piece = text.slice(pos, pos + el);
+        if (piece.length < el) piece = piece + (s.pad ? (isNumType(v.type) ? '0' : ' ').repeat(el - piece.length) : curText.slice(piece.length));
+        arr[i] = isNumType(v.type) ? coerce(v.type, zonedToNumber(piece, v.type.dec || 0)) : coerce(v.type, piece);
+        pos += el;
+      }
+      v.value = arr;
+      return null;
+    }
+    // Destino campo: se rellena desde la izquierda
+    const tt = ref.type || { t: 'char', len: toStr(ref.get()).length };
+    const len = isNumType(tt) ? tt.digits : charLen(tt);
+    const cur = isNumType(tt) ? zonedText(ref.get(), tt) : toStr(ref.get()).padEnd(len).slice(0, len);
+    let text = typeof src === 'object' && src && src.all !== undefined ? String(src.all).repeat(len).slice(0, len) : isFig(src) ? null : String(src);
+    if (text === null) { ref.set(src); return null; }
+    text = text.length >= len ? text.slice(0, len) : text + (s.pad ? (isNumType(tt) ? '0' : ' ').repeat(len - text.length) : cur.slice(text.length));
+    ref.set(isNumType(tt) ? zonedToNumber(text, tt.dec || 0) : text);
+    return null;
+  }
+
+  // IN / OUT de áreas de datos (DEFINE *DTAARA, *LDA, DTAARA(*AUTO))
+  async dtaIO(s, sc) {
+    if (!this.host.dtaara) throw new RpgError('00401', 'RNX0401', 'Data areas are not available in this environment.');
+    const names = s.target === '*DTAARA' ? [...this.dtaMap.keys()] : [s.target];
+    for (const n of names) {
+      const ext = n === '*LDA' ? '*LDA' : this.dtaMap.get(n) || n;
+      const v = sc.lookup(n === '*LDA' ? (this.dtaMap.get('*LDA') || '*LDA') : n);
+      if (s.op === 'dtain') {
+        const val = await this.host.dtaara(ext);
+        if (v && v.kind === 's') v.value = coerce(v.type, isNumType(v.type) ? toNumber(val || 0) : String(val ?? ''));
+        else if (v && v.kind === 'ds') this.dsAssign(v, String(val ?? ''));
+      } else {
+        const val = v ? (v.kind === 'ds' ? this.dsString(v.inst, v.tmpl) : v.value) : '';
+        await this.host.dtaara(ext, isNumType(v?.type || {}) ? toNumber(val) : toStr(val));
+      }
+    }
+    return null;
+  }
+
+  dsAssign(v, text) {
+    let pos = 0;
+    for (const [, f] of v.inst.fields) {
+      if (f.kind !== 's') continue;
+      const L = isNumType(f.type) ? (f.type.digits || charLen(f.type)) : charLen(f.type);
+      const piece = text.padEnd(pos + L).slice(pos, pos + L);
+      f.value = isNumType(f.type) ? coerce(f.type, zonedToNumber(piece, f.type.dec || 0)) : coerce(f.type, piece);
+      pos += L;
     }
   }
 
@@ -1064,8 +1250,9 @@ export class RpgProgram {
       if (ent.def.device === 'WORKSTN') return this.workstnOp(ent, s, sc);
       if (ent.def.device === 'PRINTER') {
         if (op === 'WRITE') {
+          if (ent.pfmt) return this.writePrtf(ent, s, sc);
           const v = s.ds ? toStr((await this.place({ k: 'id', name: s.ds }, sc)).get()) : '';
-          ent.h.write(v);
+          this.printerFor(ent).line(v, {});
         }
         return;
       }
@@ -1414,7 +1601,7 @@ export class RpgProgram {
 
 // ---------- Utilidades ----------
 function indKey(v) {
-  const m = /^\*IN(\d\d|LR|RT|H\d|U\d|K[A-Y])$/.exec(v);
+  const m = /^\*IN(\d\d|LR|RT|L[1-9]|MR|1P|OF|OV|O[A-G]|H\d|U\d|K[A-Y])$/.exec(v);
   return m ? m[1] : null;
 }
 

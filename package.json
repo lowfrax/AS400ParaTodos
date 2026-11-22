@@ -8,10 +8,11 @@
     "start": "docker compose up -d --build",
     "stop": "docker compose down",
     "logs": "docker compose logs -f ibmi-core",
-    "test": "node --no-warnings --test tests/language.test.mjs",
+    "test": "node --no-warnings --test tests/language.test.mjs tests/rpg-dialects.test.mjs",
     "test:e2e": "node tests/e2e.mjs",
     "test:connections": "node tests/connections.mjs",
-    "test:jt400": "bash tests/jt400/run.sh"
+    "test:jt400": "bash tests/jt400/run.sh",
+    "test:rpg": "node tests/rpg-e2e.mjs"
   },
   "engines": {
     "node": ">=22.5"

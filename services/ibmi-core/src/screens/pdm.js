@@ -204,7 +204,7 @@ export async function wrkmbrpdm(ctx, libIn, file, mbr = '*ALL', type = '*ALL') {
           case '14': {
             const cmd = COMPILE_CMD[m.TYPE];
             if (!cmd) { last = { text: `Member type ${m.TYPE} cannot be compiled.`, sev: 30 }; break; }
-            const kw = cmd === 'CRTPF' || cmd === 'CRTDSPF' ? 'FILE' : cmd === 'CRTSQLRPGI' ? 'OBJ' : 'PGM';
+            const kw = ['CRTPF', 'CRTLF', 'CRTDSPF', 'CRTPRTF'].includes(cmd) ? 'FILE' : cmd === 'CRTSQLRPGI' ? 'OBJ' : 'PGM';
             const extra = cmd === 'CRTPF' ? ' REPLACE(*YES)' : '';
             last = await submitJob(ctx, `${cmd} ${kw}(${ctx.curlib === lib ? lib : lib}/${m.MBR}) SRCFILE(${lib}/${file}) SRCMBR(${m.MBR})${extra}`, m.MBR);
             break;

@@ -12,10 +12,13 @@ const BLOCK_END = new Set(['ENDIF', 'ENDDO', 'ENDFOR', 'ENDSL', 'ENDMON', 'ENDSR
 const OPCODES = new Set(['IF', 'ELSEIF', 'ELSE', 'ENDIF', 'DOW', 'DOU', 'ENDDO', 'FOR', 'ENDFOR', 'SELECT', 'WHEN',
   'OTHER', 'ENDSL', 'ITER', 'LEAVE', 'LEAVESR', 'RETURN', 'BEGSR', 'ENDSR', 'EXSR', 'MONITOR', 'ON-ERROR', 'ENDMON',
   'DSPLY', 'CLEAR', 'RESET', 'EVAL', 'EVALR', 'EVAL-CORR', 'CALLP', 'SORTA', 'CALL$', 'MOVE$', 'MOVEL$',
-  '$UNSUPPORTED', 'END', 'DEALLOC', 'EXCEPT', 'COMMIT', 'ROLBK', ...FILE_OPS]);
+  '$UNSUPPORTED', 'END', 'DEALLOC', 'EXCEPT', 'COMMIT', 'ROLBK', 'GOTO$', 'TAG$', 'MOVE$P', 'MOVEL$P', 'MOVEA$', 'MOVEA$P',
+  'IN$', 'OUT$', '$DTAARA$', '$TEST$', '$BITON$', '$BITOFF$', ...FILE_OPS]);
+const DIRECTIVES = new Set(['$FILEX', '$ISPEC', '$OSPEC', '$CTDATA', '$TOTAL', '$ENDTOTAL']);
+const unb64 = (x) => JSON.parse(Buffer.from(String(x), 'base64').toString('utf8'));
 
-export function compileRpg(srcLines, { name = 'PGM', includeResolver } = {}) {
-  const pre = preprocess(srcLines, includeResolver);
+export function compileRpg(srcLines, { name = 'PGM', includeResolver, dialect } = {}) {
+  const pre = preprocess(srcLines, includeResolver, { dialect: dialect || detectDialect(srcLines) });
   const toks = tokenize(pre);
   const p = new Parser(toks);
   const ir = p.parseProgram(name);
@@ -23,6 +26,28 @@ export function compileRpg(srcLines, { name = 'PGM', includeResolver } = {}) {
 }
 
 export { CompileError };
+
+// RPG III / RPG/400 / RPG II: el código de operación está en 28-32 (en RPG IV, 26-35); además hay E/L-specs.
+export function detectDialect(lines) {
+  const ls = (lines || []).map((l) => String(l && typeof l === 'object' ? l.text : l ?? ''));
+  if (String(ls[0] || '').trim().toUpperCase().startsWith('**FREE')) return 'RPG4';
+  let r3 = 0, r4 = 0;
+  for (const l of ls) {
+    if (/^\*\*/.test(l)) break;
+    const spec = (l[5] || '').toUpperCase();
+    if (l[6] === '*' || l[6] === '/') continue;
+    if (spec === 'E' || spec === 'L') r3 += 3;
+    if (spec === 'D' || spec === 'P') r4 += 3;
+    if (spec === 'C') {
+      const op3 = l.slice(27, 32).trim().toUpperCase();
+      const op4 = l.slice(25, 35).trim().toUpperCase();
+      if (/^[A-Z][A-Z0-9-]*(\([A-Z ]*\))?$/.test(op4) && l.slice(25, 27).trim()) r4++;
+      else if (/^[A-Z][A-Z0-9-]*$/.test(op3) && !l.slice(25, 27).trim()) r3++;
+    }
+    if (spec === 'F' && /^[A-Z]/i.test(l.slice(39, 46).trim()) && !l.slice(35, 39).trim()) r3++;
+  }
+  return r3 > r4 ? 'RPG3' : 'RPG4';
+}
 
 class Parser {
   constructor(toks) {
@@ -55,10 +80,31 @@ class Parser {
   skipToSemi() { while (!this.is('eof') && !this.isOp(';')) this.next(); this.accept('op', ';'); }
 
   parseProgram(name) {
-    const ir = { version: 1, name, ctl: {}, files: [], decls: [], main: [], subrs: {}, procs: {}, protos: {}, pi: null };
+    const ir = { version: 1, name, ctl: {}, files: [], decls: [], main: [], subrs: {}, procs: {}, protos: {}, pi: null,
+      filex: {}, ispecs: [], ospecs: [], ctdata: [], totals: [] };
     this.ctx = ir;
     while (!this.is('eof')) {
       const c = this.cur;
+      if (c.type === 'id' && DIRECTIVES.has(c.value)) {
+        const line = c.line;
+        this.next();
+        if (c.value === '$TOTAL') {
+          const lvl = this.next().value;
+          this.semi();
+          const body = this.parseStmtList(new Set(['$ENDTOTAL'])).stmts;
+          if (this.isId('$ENDTOTAL')) { this.next(); this.semi(); }
+          ir.totals.push({ lvl, body, line });
+          continue;
+        }
+        if (c.value === '$ENDTOTAL') { this.semi(); continue; }
+        const v = unb64(this.next().value);
+        this.semi();
+        if (c.value === '$FILEX') ir.filex[v.file] = v;
+        else if (c.value === '$ISPEC') ir.ispecs.push(v);
+        else if (c.value === '$OSPEC') ir.ospecs.push(...v);
+        else if (c.value === '$CTDATA') ir.ctdata.push(v);
+        continue;
+      }
       if (c.type === 'id') {
         if (c.value === 'CTL-OPT') { this.next(); Object.assign(ir.ctl, kwObject(this.keywords())); this.semi(); continue; }
         if (c.value === 'DCL-PROC') { const pr = this.parseProc(); ir.procs[pr.name] = pr; continue; }
@@ -157,6 +203,16 @@ class Parser {
         case 'TEMPLATE': o.template = true; break;
         case 'VARYING': o.varying = true; break;
         case 'STATIC': o.static = true; break;
+        case 'CTDATA': o.ctdata = true; break;
+        case 'PERRCD': o.perrcd = constNum(k.args[0], line); break;
+        case 'ALT': o.alt = refName(k.args[0], line); break;
+        case 'ASCEND': o.seq = 'A'; break;
+        case 'DESCEND': o.seq = 'D'; break;
+        case 'FROMFILE': o.fromfile = refName(k.args[0], line); break;
+        case 'TOFILE': o.tofile = refName(k.args[0], line); break;
+        case 'POS': o.pos = constNum(k.args[0], line); break;
+        case 'OVERLAY': o.overlay = { name: refName(k.args[0], line), pos: k.args[1] ? (k.args[1].k === 'sp' ? k.args[1].v : constNum(k.args[1], line)) : 1 }; break;
+        case 'OCCURS': o.occurs = constNum(k.args[0], line); break;
         default: break;
       }
     }
@@ -175,7 +231,7 @@ class Parser {
     if (type.t === 'likeds' || type.t === 'likerec') {
       return { kind: 'ds', name, likeds: type.name, likerec: type.t === 'likerec', qualified: true, dim: a.dim, fields: [], line };
     }
-    return { kind: 's', name, type, dim: a.dim, inz: a.inz, line };
+    return { kind: 's', name, type, dim: a.dim, inz: a.inz, line, ctdata: a.ctdata, perrcd: a.perrcd, alt: a.alt, seq: a.seq, fromfile: a.fromfile };
   }
 
   parseDclC() {
@@ -216,7 +272,7 @@ class Parser {
       } else {
         if (!ft) throw new CompileError('RNF3303', `The data type for subfield ${fname} is not specified.`, fl);
         if (fa.varying && ft.t === 'char') ft.t = 'varchar';
-        ds.fields.push({ name: fname, type: ft, inz: fa.inz, dim: fa.dim, line: fl });
+        ds.fields.push({ name: fname, type: ft, inz: fa.inz, dim: fa.dim, line: fl, pos: fa.pos, overlay: fa.overlay, ctdata: fa.ctdata, perrcd: fa.perrcd });
       }
     }
     this.next();
@@ -243,6 +299,10 @@ class Parser {
         case 'SFILE': f.sfile[refName(k.args[0], line)] = refName(k.args[1], line); break;
         case 'PREFIX': f.prefix = refName(k.args[0], line); break;
         case 'INDDS': f.indds = refName(k.args[0], line); break;
+        case 'OFLIND': f.oflind = k.args[0] ? String(k.args[0].v || k.args[0].name || '').replace(/^\*IN/, '') : 'OF'; break;
+        case 'FORMLEN': f.formlen = constNum(k.args[0], line); break;
+        case 'FORMOFL': f.formofl = constNum(k.args[0], line); break;
+        case 'COMMIT': f.commit = true; break;
         default: break;
       }
     }
@@ -342,7 +402,8 @@ class Parser {
       const c = this.cur;
       if (c.type === 'eof') break;
       if (c.type === 'id' && (enders.has(c.value) || BLOCK_END.has(c.value))) break;
-      if (topLevel && c.type === 'id' && ['DCL-S', 'DCL-C', 'DCL-DS', 'DCL-F', 'DCL-PR', 'DCL-PI', 'DCL-PROC', 'BEGSR', 'CTL-OPT'].includes(c.value)) break;
+      if (topLevel && c.type === 'id' && (['DCL-S', 'DCL-C', 'DCL-DS', 'DCL-F', 'DCL-PR', 'DCL-PI', 'DCL-PROC', 'BEGSR', 'CTL-OPT'].includes(c.value) || DIRECTIVES.has(c.value))) break;
+      if (c.type === 'id' && c.value === '$ENDTOTAL') break;
       stmts.push(this.parseStmt());
     }
     return { stmts };
@@ -509,15 +570,33 @@ class Parser {
         this.semi();
         return { op: 'callpgm', pgm, parms, line };
       }
-      case 'MOVE$': case 'MOVEL$': {
-        const src = this.expr(); const target = this.postfix(); this.semi();
-        return { op: 'move', left: op === 'MOVEL$', src, target, line };
+      case 'MOVE$': case 'MOVEL$': case 'MOVE$P': case 'MOVEL$P': case 'MOVEA$': case 'MOVEA$P': {
+        const src = this.expr(); this.accept('op', ':'); const target = this.postfix(); this.semi();
+        if (op.startsWith('MOVEA')) return { op: 'movea', src, target, pad: op.endsWith('P'), line };
+        return { op: 'move', left: op.startsWith('MOVEL'), pad: op.endsWith('P'), src, target, line };
       }
+      case 'GOTO$': case 'TAG$': { const label = this.next().value; this.semi(); return { op: op === 'GOTO$' ? 'goto' : 'tag', label: String(label).toUpperCase(), line }; }
+      case 'IN$': case 'OUT$': {
+        const lock = this.is('special') && this.cur.value === '*LOCK' ? (this.next(), true) : false;
+        const target = this.is('special') ? this.next().value : this.name();
+        this.semi();
+        return { op: op === 'IN$' ? 'dtain' : 'dtaout', target, lock, line };
+      }
+      case '$DTAARA$': { const name = this.name(); const ext = this.next().value; this.semi(); return { op: 'dtadef', name, ext, line }; }
+      case '$TEST$': {
+        const ext2 = this.expr(); this.accept('op', ':'); const fmt = this.expr(); this.accept('op', ':'); const target = this.postfix(); this.semi();
+        return { op: 'test', ext: ext2.v || '', fmt, target, line };
+      }
+      case '$BITON$': case '$BITOFF$': {
+        const bits = this.expr(); this.accept('op', ':'); const target = this.postfix(); this.semi();
+        return { op: 'bit', on: op === '$BITON$', bits: bits.v, target, line };
+      }
+      case 'EXCEPT': { const name = this.is('id') ? this.next().value : ''; this.semi(); return { op: 'except', name, line }; }
       case '$UNSUPPORTED': {
         const t = this.next(); this.semi();
         throw new CompileError('RNF5113', `Operation code ${t.value} is not supported by this compiler.`, line);
       }
-      case 'DEALLOC': case 'EXCEPT': this.skipToSemi(); return { op: 'nop', line };
+      case 'DEALLOC': this.skipToSemi(); return { op: 'nop', line };
       default: break;
     }
     if (FILE_OPS.has(op)) return this.parseFileOp(op, ext, line);

@@ -5,12 +5,15 @@ import { parsePF, parseDSPF, pfToSql } from '../../../shared/dds.js';
 import { describeFile, findObject, objectData, readMember } from '../../../shared/catalog.js';
 
 const SQLCA = ['SQLCODE', 'SQLCOD', 'SQLSTATE', 'SQLSTT', 'SQLERRMC', 'SQLER3', 'SQLERRD'];
-const BUILTIN_NAMES = ['UDATE', 'UYEAR', 'UMONTH', 'UDAY', '*N'];
+const BUILTIN_NAMES = ['UDATE', 'UYEAR', 'UMONTH', 'UDAY', '*N', '$CALLLR$'];
+const OPM_TYPES = { RPG: 'RPG', RPG38: 'RPG38', RPG36: 'RPG36', RPT: 'RPG', RPT38: 'RPG38', RPT36: 'RPG36' };
 
 export const PRODUCT = {
   RPGLE: { id: '5770WDS', name: 'ILE RPG', cmd: 'CRTBNDRPG' },
   SQLRPGLE: { id: '5770ST1', name: 'ILE RPG (SQL precompiler)', cmd: 'CRTSQLRPGI' },
-  RPG: { id: '5770WDS', name: 'ILE RPG', cmd: 'CRTBNDRPG' },
+  RPG: { id: '5770WDS', name: 'RPG/400', cmd: 'CRTRPGPGM' },
+  RPG38: { id: '5770WDS', name: 'RPG/38', cmd: 'CRTRPGPGM' },
+  RPG36: { id: '5770WDS', name: 'RPG II (System/36 environment)', cmd: 'CRTRPGPGM' },
   CLLE: { id: '5770SS1', name: 'ILE CL', cmd: 'CRTBNDCL' },
   CLP: { id: '5770SS1', name: 'ILE CL', cmd: 'CRTBNDCL' },
   PF: { id: '5770SS1', name: 'DDS', cmd: 'CRTPF' },
@@ -29,14 +32,15 @@ export async function compile(gw, req) {
   const libl = req.libl && req.libl.length ? req.libl : ['QGPL'];
   const t0 = Date.now();
   try {
-    if (type === 'RPGLE' || type === 'SQLRPGLE' || type === 'RPG' || type === 'RPG38' || type === 'RPGIV') {
+    if (type === 'RPGLE' || type === 'SQLRPGLE' || type === 'RPGIV' || OPM_TYPES[type]) {
       const includes = await prefetchIncludes(gw, lines, libl, req.lib);
       const ir = compileRpg(lines, {
         name: req.name,
+        dialect: OPM_TYPES[type] ? 'RPG3' : 'RPG4',
         includeResolver: ({ lib, file, member }) => includes.get(`${lib || ''}/${file}/${member}`) || includes.get(`/${file}/${member}`) || null,
       });
       await semanticRpg(gw, ir, libl, add);
-      object = { type: '*PGM', attr: type === 'SQLRPGLE' ? 'SQLRPGLE' : 'RPGLE', data: { kind: 'RPG', ir } };
+      object = { type: '*PGM', attr: OPM_TYPES[type] || (type === 'SQLRPGLE' ? 'SQLRPGLE' : 'RPGLE'), data: { kind: 'RPG', ir } };
     } else if (type === 'CLLE' || type === 'CLP') {
       const ir = compileCL(lines);
       semanticCl(ir, lines, add);
@@ -92,12 +96,25 @@ async function prefetchIncludes(gw, lines, libl, curLib, depth = 0, map = new Ma
 // ---------- Análisis semántico RPG ----------
 async function semanticRpg(gw, ir, libl, add) {
   const globals = new Set([...SQLCA, ...BUILTIN_NAMES]);
+  if ((ir.ospecs || []).length) for (const n of ['PAGE', 'PAGE1', 'PAGE2', 'PAGE3', 'PAGE4', 'PAGE5', 'PAGE6', 'PAGE7']) globals.add(n);
   const fileNames = new Set();
   const dsFields = new Map();
   for (const f of ir.files) {
     fileNames.add(f.name);
     try {
-      if (f.device === 'DISK') {
+      if (f.device === 'PRINTER') {
+        // Archivo de impresora descrito externamente (PRTF): sus formatos y campos
+        const qn = f.extfile || f.name;
+        const [lib, name] = qn.includes('/') ? qn.split('/') : ['*LIBL', qn];
+        const o = await findObject(gw, name, '*FILE', lib, libl).catch(() => null);
+        const data = o ? await objectData(gw, o.LIB, name, '*FILE') : null;
+        if (data && data.kind === 'PRTF') {
+          for (const [fmt, def] of Object.entries(data.formats)) {
+            fileNames.add(f.rename[fmt] || fmt);
+            for (const fld of def.fields) if (fld.name) globals.add((f.prefix || '') + fld.name);
+          }
+        }
+      } else if (f.device === 'DISK') {
         const d = await describeFile(gw, f.extfile || f.name, libl);
         fileNames.add(f.rename[d.format] || d.format);
         for (const fld of d.fields) globals.add((f.prefix || '') + fld.name);
@@ -155,6 +172,7 @@ async function semanticRpg(gw, ir, libl, add) {
         if (!scope.has(e.name) && !callables.has(e.name)) undefinedName(e.name, line);
         return;
       case 'call':
+        if (/^\$[A-Z]+\$$/.test(e.name)) { e.args.forEach((a) => checkExpr(a, scope, line)); return; }
         if (!scope.has(e.name) && !callables.has(e.name)) undefinedName(e.name, line);
         e.args.forEach((a) => checkExpr(a, scope, line));
         return;
@@ -190,7 +208,8 @@ async function semanticRpg(gw, ir, libl, add) {
         case 'exsr': if (!localSubrs.has(s.name) && !subrs.has(s.name)) add('RNF7030', 30, `The subroutine ${s.name} is not defined.`, L); break;
         case 'dsply': checkExpr(s.msg, scope, L); checkExpr(s.resp, scope, L); break;
         case 'clear': case 'reset': case 'sorta': checkExpr(s.target, scope, L); break;
-        case 'move': checkExpr(s.src, scope, L); checkExpr(s.target, scope, L); break;
+        case 'move': case 'movea': checkExpr(s.src, scope, L); checkExpr(s.target, scope, L); break;
+        case 'test': case 'bit': checkExpr(s.target, scope, L); break;
         case 'callpgm': s.parms.forEach((p) => checkExpr(p, scope, L)); break;
         case 'file':
           if (!s.file.startsWith('*') && !fileNames.has(s.file)) add('RNF7030', 30, `The file or record format ${s.file} is not defined.`, L);
@@ -212,6 +231,7 @@ async function semanticRpg(gw, ir, libl, add) {
     }
   };
   checkStmts(ir.main, globals, new Set());
+  for (const t of ir.totals || []) checkStmts(t.body, globals, new Set());
   for (const sr of Object.values(ir.subrs)) checkStmts(sr, globals, new Set());
   for (const p of Object.values(ir.procs)) {
     const local = new Set(globals);
@@ -228,7 +248,9 @@ async function semanticRpg(gw, ir, libl, add) {
 }
 
 function hasLrOrReturn(ir) {
-  const s = JSON.stringify([ir.main, ir.subrs]);
+  // Con archivo primario el ciclo termina solo (LR al fin de archivo)
+  if (Object.values(ir.filex || {}).some((f) => f.desig === 'P')) return true;
+  const s = JSON.stringify([ir.main, ir.subrs, ir.totals || []]);
   return s.includes('"*INLR"') || s.includes('"op":"return"');
 }
 
