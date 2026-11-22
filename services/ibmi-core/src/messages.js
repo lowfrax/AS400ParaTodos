@@ -141,6 +141,8 @@ export function msgText(id, ...args) {
   return t.replace(/&\d/g, '').replace(/\s+\./g, '.').trim();
 }
 export function msgSev(id) { return M[id] ? M[id][0] : 30; }
+/** Definición cruda del catálogo del sistema (QCPFMSG): [gravedad, texto con &1.., causa, recuperación] */
+export function msgDef(id) { return M[id] || null; }
 export function msgHelp(id) {
   const d = M[id];
   return {

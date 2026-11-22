@@ -110,6 +110,8 @@ function makeHost(ctx, pgmName) {
     sql: (t, p) => ctx.sql(t, p),
     callProgram: async (n, r) => {
       try { await callProgram(ctx, n, '*LIBL', r); } catch (e) {
+        // Un *ESCAPE enviado a la entrada anterior de la pila (QMHSNDPM '*' 1) termina este programa y llega a su llamador
+        if (e instanceof CLError && e.escapeToCaller) { e.escapeToCaller = false; throw e; }
         if (e instanceof CLError) throw new RpgError('00211', 'RNX0211', `Error calling program ${n}: ${e.message}`);
         throw e;
       }

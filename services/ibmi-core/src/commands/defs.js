@@ -500,11 +500,6 @@ def('CHGSYSVAL', 'Change System Value', [P('SYSVAL', 'System value', 'name', 10,
 });
 
 // ---------- Mensajes de programa (también como mandato interactivo) ----------
-def('SNDPGMMSG', 'Send Program Message', [P('MSG', 'Message text', 'text', 256, { req: true, promptLen: 120 }), P('MSGTYPE', 'Message type', 'char', 7, { dft: '*INFO' })], async (ctx, a) => {
-  logJob(ctx.job, '', a.MSGTYPE, a.MSG);
-  if (a.MSGTYPE === '*ESCAPE') throw new CLError('CPF9898', a.MSG);
-  return { text: a.MSG, sev: 0 };
-});
 def('PWRDWNSYS', 'Power Down System', [P('OPTION', 'How to end', 'char', 10, { dft: '*CNTRLD' })], async () => { throw new CLError('CPF1096'); });
 def('RTVJOBA', 'Retrieve Job Attributes', [], async () => { throw new CLError('CPD0031', 'RTVJOBA'); });
 

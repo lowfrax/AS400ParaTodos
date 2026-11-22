@@ -1,5 +1,6 @@
 // Parser de RPG IV (formato libre) -> IR JSON ejecutable por el intérprete (interpreter.js).
 import { preprocess, tokenize, CompileError } from './lexer.js';
+import { TO_UNI } from '../ebcdic.js';
 
 const TYPE_KW = new Set([
   'CHAR', 'VARCHAR', 'GRAPH', 'VARGRAPH', 'UCS2', 'VARUCS2', 'PACKED', 'ZONED', 'BINDEC', 'INT', 'UNS',
@@ -740,6 +741,13 @@ class Parser {
       case 'special':
         this.next();
         if (c.value === '*ALL' && this.is('str')) return { k: 'all', v: this.next().value };
+        // *ALLX'hh…': repetición de bytes EBCDIC
+        if (c.value === '*ALLX' && this.is('str')) {
+          const hx = this.next().value;
+          let v = '';
+          for (let k = 0; k < hx.length; k += 2) v += String.fromCharCode(TO_UNI[37][parseInt(hx.slice(k, k + 2), 16) || 0]);
+          return { k: 'all', v };
+        }
         return { k: 'sp', v: c.value };
       case 'bif': {
         this.next();

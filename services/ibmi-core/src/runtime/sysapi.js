@@ -63,11 +63,32 @@ const PROGRAMS = {
   // QMHSNDPM(msgid, msgf, msgdta, msgdtalen, msgtype, callstack, counter, msgkey, errcode): se usa sobre todo para *ESCAPE/*DIAG/*COMP.
   async QMHSNDPM(ctx, refs) {
     const id = rtrim(refs[0]?.get()) || 'CPF9898';
+    // Archivo de mensajes cualificado de 20: nombre (10) + biblioteca (10)
+    const mf = str(refs[1]?.get()).padEnd(20);
+    const msgf = mf.trim() ? `${mf.slice(10, 20).trim() || '*LIBL'}/${mf.slice(0, 10).trim()}` : 'QCPFMSG';
     const data = str(refs[2]?.get()).slice(0, num(refs[3]?.get()) || undefined);
     const type = rtrim(refs[4]?.get()) || '*INFO';
-    logJob(ctx.job, id, type, rtrim(data));
-    if (type === '*ESCAPE') throw new CLError('CPF9898', rtrim(data));
-    ctx.pgmMsgs = (ctx.pgmMsgs || []).concat([{ id, text: rtrim(data), sev: type === '*DIAG' ? 30 : 0 }]);
+    let text = rtrim(data);
+    let sev = 0;
+    if (rtrim(refs[0]?.get())) {
+      try {
+        const { getMsgd, formatMsg } = await import('../msgf.js');
+        const d = await getMsgd(ctx, id, msgf);
+        text = formatMsg(d, data).text;
+        sev = d.sev || 0;
+      } catch { /* sin descripción: el texto son los datos */ }
+    }
+    logJob(ctx.job, id, type, text, { sev, data });
+    const stack = rtrim(refs[5]?.get()) || '*';
+    const counter = refs[6] ? num(refs[6].get()) : 1;
+    if (type === '*ESCAPE') {
+      const e = new CLError(id, text);
+      e.message = text; e.msgId = id; e.msgdta = data; e.msgf = msgf;
+      // '*' con contador 1 (lo habitual): el mensaje va al llamador del programa que llama a la API
+      e.escapeToCaller = stack === '*' && counter >= 1;
+      throw e;
+    }
+    ctx.pgmMsgs = (ctx.pgmMsgs || []).concat([{ id, text, sev: type === '*DIAG' ? Math.max(30, sev) : sev, type, data }]);
   },
 };
 
