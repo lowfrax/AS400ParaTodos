@@ -1,9 +1,15 @@
-# AS400 para Todos: IBM Db2 + DB2 Gateway + Compilador RPG + Núcleo IBM i (terminal 5250 web).
-#   docker compose up -d --build
-#   Terminal 5250 ......... http://localhost:5250
-#   Panel del sistema ..... http://localhost:5250/dashboard/
-#   Panel del compilador .. http://localhost:5251
-#   Panel de DB2 .......... http://localhost:5252
+# AS400 para Todos: IBM Db2 + DB2 Gateway + Compilador RPG + Núcleo IBM i + conectividad completa.
+#   docker compose up -d --build                 (sistema completo + Mailpit)
+#   docker compose --profile mq up -d            (además, un IBM MQ real enlazado por la API REST de MQ)
+#
+#   Terminal 5250 web ....... http://localhost:5250            Panel del sistema ... http://localhost:5250/dashboard/
+#   TN5250 (ACS, tn5250j) ... localhost:23 (TLS 992)           FTP / FTPS .......... localhost:21 / 990 (pasivo 30000-30009)
+#   API REST / IWS / XMLSERVICE / Open Banking .. http://localhost:10010 (HTTPS 10443) · docs: /docs
+#   Mapepire (WebSocket SQL) .. wss://localhost:8076/db/       DRDA (Db2) .......... localhost:446 y 50000
+#   Servidores host (jt400/ODBC/ACS) .. 449, 8470-8476 (TLS 9470-9476)
+#   ISO 8583 (ATM/POS) ...... localhost:8583                   REXEC ............... localhost:512
+#   SSH / QSH ............... localhost:2222                    SNMP / NTP / LPD .... 161/udp, 1123/udp, 515
+#   Correo (Mailpit) ........ http://localhost:8025
 name: as400-para-todos
 
 services:
@@ -30,6 +36,7 @@ services:
       ETCD_PASSWORD: ""
     ports:
       - "50000:50000"
+      - "${DRDA_PORT:-446}:50000"   # puerto DRDA de IBM i (446): JDBC db2jcc, ibm_db (Python/Node), ODBC de Db2, DBeaver
     volumes:
       - db2data:/database
     healthcheck:
@@ -70,17 +77,77 @@ services:
   ibmi-core:
     build: { context: ., dockerfile: services/ibmi-core/Dockerfile }
     container_name: as400-ibmi-core
+    hostname: as400tds
     environment:
       SYSTEM_NAME: ${SYSTEM_NAME:-AS400TDS}
       GATEWAY_URL: http://db2-gateway:5252
       COMPILER_URL: http://rpg-compiler:5251
       TZ: ${TZ:-America/Mexico_City}
+      IFS_ROOT: /ifs
+      # CORS de la API REST: '*' o lista de orígenes (https://app.midominio.com,http://localhost:5000)
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      CORS_CREDENTIALS: ${CORS_CREDENTIALS:-false}
+      # FTP pasivo: dirección que se anuncia a los clientes (la del host que publica los puertos)
+      FTP_PASV_ADDRESS: ${FTP_PASV_ADDRESS:-127.0.0.1}
+      # Correo saliente (SNDSMTPEMM, alertas del banco): Mailpit por omisión
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      # Eventos del core bancario → webhooks (lista de URL separadas por comas)
+      BANK_WEBHOOKS: ${BANK_WEBHOOKS:-}
+      BANK_WEBHOOK_SECRET: ${BANK_WEBHOOK_SECRET:-banco-webhook}
+      # IBM MQ real (perfil "mq"): MQ_REST_URL=https://mq:9443/ibmmq/rest/v3/messaging/qmgr/QM1
+      MQ_REST_URL: ${MQ_REST_URL:-}
+      TLS_HOSTNAMES: ${TLS_HOSTNAMES:-localhost,as400tds,ibmi-core}
     ports:
-      - "5250:5250"
+      - "5250:5250"                        # emulador 5250 web y panel
+      - "${TELNET_PORT:-23}:23"            # TN5250
+      - "${TELNETS_PORT:-992}:992"         # TN5250 sobre TLS
+      - "${FTP_PORT:-21}:21"               # FTP (NAMEFMT 0/1, AUTH TLS)
+      - "${FTPS_PORT:-990}:990"            # FTPS implícito
+      - "30000-30009:30000-30009"          # FTP pasivo
+      - "${REXEC_PORT:-512}:512"           # REXEC
+      - "${SSH_PORT:-2222}:22"             # SSH / QSH / SFTP
+      - "${HTTP_PORT:-10010}:10010"        # API REST, IWS, XMLSERVICE, CGI, Open Banking, MQ REST
+      - "${HTTPS_PORT:-10443}:10443"
+      - "${MAPEPIRE_PORT:-8076}:8076"      # Mapepire (wss)
+      - "${ISO8583_PORT:-8583}:8583"       # switch ISO 8583 (ATM/POS)
+      - "${HOSTSVR_MAP_PORT:-449}:449"     # as-svrmap
+      - "8470-8476:8470-8476"              # servidores host: central, database, dtaq, file, netprt, rmtcmd, signon
+      - "9470-9476:9470-9476"              # servidores host sobre TLS
+      - "${LPD_PORT:-515}:515"             # LPD (impresión remota hacia colas de salida)
+      - "${SNMP_PORT:-161}:161/udp"        # agente SNMP
+      - "${NTP_PORT:-1123}:123/udp"        # NTP / SNTP
+    volumes:
+      - ifsdata:/ifs
     depends_on:
       - db2-gateway
       - rpg-compiler
     restart: unless-stopped
 
+  # Correo de pruebas: recibe lo que envía el IBM i (SNDSMTPEMM, alertas, cierre diario) → http://localhost:8025
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: as400-mailpit
+    ports:
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+    restart: unless-stopped
+
+  # IBM MQ real (opcional): docker compose --profile mq up -d   · consola: https://localhost:9443 (admin/passw0rd)
+  mq:
+    image: icr.io/ibm-messaging/mq:latest
+    container_name: as400-mq
+    profiles: ["mq"]
+    environment:
+      LICENSE: accept
+      MQ_QMGR_NAME: QM1
+      MQ_APP_PASSWORD: passw0rd
+      MQ_ADMIN_PASSWORD: passw0rd
+    ports:
+      - "1414:1414"
+      - "9443:9443"
+    restart: unless-stopped
+
 volumes:
   db2data:
+  ifsdata:

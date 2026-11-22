@@ -358,6 +358,12 @@ export class RpgProgram {
           throw e;
         }
       }
+      case 'commit': case 'rolbk': {
+        const r = this.host.sqlControl ? await this.host.sqlControl(s.op === 'commit' ? 'COMMIT' : 'ROLLBACK', {}) : null;
+        this.last.error = !!(r && r.error);
+        if (r && r.error && !(s.ext || '').includes('E')) throw new RpgError('00802', 'RNX0802', `Commitment control error: ${r.error}`);
+        return null;
+      }
       case 'dsply': {
         const text = s.msg ? toStr(await this.ev(s.msg, sc)) : '';
         if (s.resp) {
@@ -730,7 +736,19 @@ export class RpgProgram {
         return undefined;
       }
       // Procedimiento externo de sistema conocido
-      if (this.host.callProc) return this.host.callProc(pr.extproc || name, await Promise.all(args.map((a) => this.ev(a, sc))));
+      if (this.host.callProc) {
+        const vals = [];
+        const places = [];
+        for (let i = 0; i < args.length; i++) {
+          const p = pr.params[i];
+          const byRef = p && !p.value && !p.const && ['id', 'dot', 'idx', 'call'].includes(args[i].k);
+          const pl = byRef ? await this.place(args[i], sc).catch(() => null) : null;
+          places.push(pl);
+          vals.push(pl ? pl.get() : await this.ev(args[i], sc));
+        }
+        const r = await this.host.callProc(pr.extproc || name, vals, places, pr);
+        return r === undefined || !pr.returns ? r : coerce(this.resolveType(pr.returns, this.globals), r);
+      }
     }
     throw new RpgError('00211', 'RNX0211', `Program or procedure ${name} is not defined.`);
   }
@@ -992,6 +1010,8 @@ export class RpgProgram {
       }
       case '%NULLIND': return '0';
       case '%ADDR': case '%PADDR': return null;
+      // %STR: los "punteros" a cadena de las APIs del sistema (getenv…) son cadenas JS terminadas en NUL.
+      case '%STR': { const s0 = a[0] ? await this.ev(a[0], sc) : ''; const t = s0 === null || s0 === undefined ? '' : toStr(s0).split('\u0000')[0]; return a[1] ? t.slice(0, toNumber(await this.ev(a[1], sc))) : t; }
       default:
         throw new RpgError('00202', 'RNF7030', `Built-in function ${e.name} is not supported.`);
     }
@@ -1279,11 +1299,22 @@ export class RpgProgram {
   async execSql(text, sc) {
     const T = text.trim();
     const U = T.toUpperCase();
+    let m;
+    // Control de compromiso: SET OPTION COMMIT = *CHG|*CS|*ALL|*NONE, COMMIT [HOLD], ROLLBACK [HOLD]
+    if ((m = /^SET\s+OPTION\b[\s\S]*\bCOMMIT\s*=\s*(\*\w+)/i.exec(T)) && this.host.sqlControl) {
+      const r = await this.host.sqlControl('OPTION', { commit: m[1].toUpperCase() });
+      if (r && r.error) this.setSqlca(r.sqlcode ?? -901, r.sqlstate || '58004', r.error); else this.setSqlca(0, '00000');
+      return;
+    }
+    if ((m = /^(COMMIT|ROLLBACK)(?:\s+WORK)?(\s+HOLD)?\s*$/i.exec(T)) && this.host.sqlControl) {
+      const r = await this.host.sqlControl(m[1].toUpperCase(), { hold: !!m[2] });
+      if (r && r.error) this.setSqlca(r.sqlcode ?? -901, r.sqlstate || '58004', r.error); else this.setSqlca(0, '00000');
+      return;
+    }
     if (/^SET\s+OPTION\b/.test(U) || /^(COMMIT|ROLLBACK)\b/.test(U) || /^WHENEVER\b/.test(U) || /^INCLUDE\b/.test(U)) {
       this.setSqlca(0, '00000');
       return;
     }
-    let m;
     if ((m = /^DECLARE\s+([\w#@$]+)\s+(?:(?:INSENSITIVE|SENSITIVE|ASENSITIVE|NO\s+SCROLL|SCROLL|DYNAMIC)\s+)*CURSOR\s+(?:WITH(?:OUT)?\s+(?:HOLD|RETURN)\s+)*FOR\s+([\s\S]+)$/i.exec(T))) {
       const src = m[2].trim();
       this.cursors.set(m[1].toUpperCase(), /^[\w#@$]+$/.test(src) ? { stmt: src.toUpperCase() } : { text: src });

@@ -7,10 +7,11 @@ import { setStatus, logJob, qualifiedJob, sysDate, sysTime } from '../system.js'
 import { Panel } from '../panel.js';
 import { displayFormat } from './dspf.js';
 import { runCl } from './clrun.js';
+import { callSystemProc, systemProgram } from './sysapi.js';
 
 const programCache = new Map(); // `${lib}/${name}` -> {changed, data}
 
-async function loadProgram(ctx, name, lib) {
+export async function loadProgram(ctx, name, lib) {
   const o = await findObject(gw, name, '*PGM', lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(lib), ctx.libl);
   if (!o) throw new CLError('CPF9811', name, lib || '*LIBL');
   const key = `${o.LIB}/${name}`;
@@ -27,6 +28,12 @@ export async function callProgram(ctx, name, lib, refs = []) {
   if (name === 'QCMD') {
     const { commandEntry } = await import('../screens/misc.js');
     await commandEntry(ctx);
+    return [];
+  }
+  // APIs del sistema (QSNDDTAQ, QRCVDTAQ, QCMDEXC, QSYS2…): programas *PGM de QSYS implementados en el núcleo.
+  const api = systemProgram(name);
+  if (api && (!lib || lib === '*LIBL' || lib === 'QSYS')) {
+    await api(ctx, refs);
     return [];
   }
   const { o, data, key } = await loadProgram(ctx, name, lib);
@@ -53,7 +60,22 @@ function makeHost(ctx, pgmName) {
   const host = {
     user: job.user,
     describeFile: (n) => describeFile(gw, n, ctx.libl).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); }),
-    openDisk: (desc) => new DiskFile({ name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys, sql: (t, p) => gw.sql(t, p, { client }) }),
+    openDisk: (desc) => new DiskFile({
+      name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys,
+      sql: async (t, p) => { await ctx.ensureCommit(); return gw.sql(t, p, { client, tx: job.cmt?.tx }); },
+    }),
+    // SET OPTION COMMIT / COMMIT / ROLLBACK (SQL) y COMMIT / ROLBK (RPG)
+    async sqlControl(verb, o = {}) {
+      try {
+        if (verb === 'OPTION') {
+          if (o.commit && o.commit !== '*NONE' && !job.cmt) { await ctx.startCommit(o.commit); job.cmt.auto = true; }
+          return null;
+        }
+        const r = verb === 'COMMIT' ? await ctx.commit(o) : await ctx.rollback(o);
+        return r && r.error ? r : null;
+      } catch (e) { return { error: e.message, sqlstate: e.sqlstate || '2D521', sqlcode: e.sqlcode ?? -751 }; }
+    },
+    callProc: (n, args, places) => callSystemProc(ctx, n, args, places),
     async describeDisplay(n) {
       const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
       const fo = await findObject(gw, nm, '*FILE', lib, ctx.libl);

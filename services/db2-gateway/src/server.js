@@ -79,7 +79,7 @@ function publicStatus() {
   };
 }
 
-async function runSql(sql, params, client = 'anon') {
+async function runSql(sql, params, client = 'anon', tx = null) {
   if (state.status !== 'ready') {
     const e = new Error('Database not available. IPL in progress.');
     e.sqlstate = '08001';
@@ -90,9 +90,9 @@ async function runSql(sql, params, client = 'anon') {
   const t0 = performance.now();
   const verb = (String(sql).trim().match(/^\w+/) || ['?'])[0].toUpperCase();
   state.inflight++;
-  const entry = { id, ts: Date.now(), client, verb, sql: String(sql).slice(0, 2000), params: (params || []).slice(0, 20) };
+  const entry = { id, ts: Date.now(), client, verb, sql: String(sql).slice(0, 2000), params: (params || []).slice(0, 20).map((p) => (typeof p === 'string' && p.length > 200 ? `${p.slice(0, 200)}…` : p)), ...(tx ? { tx } : {}) };
   try {
-    const r = await driver.exec(sql, params);
+    const r = tx ? await driver.txExec(tx, sql, params) : await driver.exec(sql, params);
     entry.ms = +(performance.now() - t0).toFixed(2);
     entry.ok = true;
     entry.rows = r.rowCount;
@@ -141,6 +141,7 @@ function stats() {
     byClient: state.byClient,
     byVerb: state.byVerb,
     pool: driver.poolInfo(),
+    transactions: driver.transactions(),
     history: state.history,
     info: state.info,
     uptime: Math.round((Date.now() - state.startedAt) / 1000),
@@ -173,14 +174,43 @@ app.get('/log', (req, res) => sendJson(res, 200, state.log.slice(-Number(req.que
 app.get('/events', (req, res) => hub.handle(req, res, [['stats', stats()], ['log', state.log.slice(-100)]]));
 
 app.post('/sql', async (req, res) => {
-  const { sql, params, client } = req.body || {};
+  const { sql, params, client, tx } = req.body || {};
   if (!sql) return sendJson(res, 400, { error: 'sql requerido' });
   try {
-    sendJson(res, 200, await runSql(sql, params || [], client || req.headers['x-client'] || 'http'));
+    sendJson(res, 200, await runSql(sql, params || [], client || req.headers['x-client'] || 'http', tx || null));
   } catch (e) {
     sendJson(res, 200, { error: e.message, sqlstate: e.sqlstate || '58004', sqlcode: e.sqlcode ?? -901 });
   }
 });
+
+// ---- Control de compromiso: BEGIN / COMMIT / ROLLBACK sobre una conexión dedicada ----
+const txLog = (client, verb, tx, ok = true, error) => {
+  const entry = { id: ++seq, ts: Date.now(), client: client || 'tx', verb, sql: verb, params: [], tx, ok, ms: 0, ...(error ? { error } : {}) };
+  state.log.push(entry);
+  if (state.log.length > 300) state.log.shift();
+  hub.broadcast('query', entry);
+};
+app.post('/tx/begin', async (req, res) => {
+  if (state.status !== 'ready') return sendJson(res, 200, { error: 'Database not available.', sqlstate: '08001', sqlcode: -30081 });
+  try {
+    const tx = await driver.begin(req.body?.client, req.body?.isolation);
+    txLog(req.body?.client, 'BEGIN', tx);
+    sendJson(res, 200, { tx });
+  } catch (e) { sendJson(res, 200, { error: e.message, sqlstate: e.sqlstate || '58004', sqlcode: e.sqlcode ?? -901 }); }
+});
+for (const verb of ['commit', 'rollback']) {
+  app.post(`/tx/:id/${verb}`, async (req, res) => {
+    try {
+      const r = await driver[verb](req.params.id, !!req.body?.keep);
+      txLog(req.body?.client, verb.toUpperCase(), req.params.id);
+      sendJson(res, 200, r);
+    } catch (e) {
+      txLog(req.body?.client, verb.toUpperCase(), req.params.id, false, e.message);
+      sendJson(res, 200, { error: e.message, sqlstate: e.sqlstate || '58004', sqlcode: e.sqlcode ?? -901 });
+    }
+  });
+}
+app.get('/tx', (req, res) => sendJson(res, 200, driver.transactions()));
 
 // Ejecuta varias sentencias en orden; ignore = lista de SQLSTATE tolerados (p.ej. 42710 "ya existe").
 app.post('/batch', async (req, res) => {

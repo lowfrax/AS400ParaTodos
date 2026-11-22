@@ -40,8 +40,10 @@ export function createJob({ name, user, type = 'INT', subsystem = 'QINTER', fn =
 
 export function qualifiedJob(job) { return `${job.number}/${job.user}/${job.name}`; }
 
+export const jobEndHooks = [];
 export function endJob(job, code = 0) {
   if (!jobs.has(job.number)) return;
+  for (const h of jobEndHooks) { try { h(job, code); } catch (e) { console.error('[job] end hook', e); } }
   const d = new Date();
   logJob(job, 'CPF1164', '*COMP', msgText('CPF1164', job.number, job.user, job.name, sysDate(d), sysTime(d), (job.cpuMs / 1000).toFixed(3)));
   job.status = 'END';

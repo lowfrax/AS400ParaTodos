@@ -1,6 +1,7 @@
 // Contexto de ejecución de un trabajo (interactivo o por lotes) y resolución SQL por *LIBL.
 import { gw, SYSTEM_LIBS } from './objects.js';
 import { CLError } from './messages.js';
+import { jobEndHooks } from './system.js';
 
 export class Ctx {
   constructor({ session = null, job, user, interactive = !!session }) {
@@ -25,10 +26,57 @@ export class Ctx {
     if (!this.session) throw new CLError('CPD0031', panel.fn || 'display');
     return this.session.display(panel);
   }
-  async sql(text, params = []) {
-    const q = await qualifySql(text, this.libl, this.curlib);
-    return gw.sql(q, params, { client: `${this.job.number}/${this.job.user}/${this.job.name}` });
+  get client() { return `${this.job.number}/${this.job.user}/${this.job.name}`; }
+  async sql(text, params = [], opts = {}) {
+    // Servicios SQL de IBM i (QSYS2.QCMDEXC, HTTP_GET, colas de datos, vistas de catálogo…) se resuelven en el núcleo.
+    const { sqlServices } = await import('./sql/services.js');
+    const handled = await sqlServices(this, String(text), params, opts);
+    if (handled) return handled;
+    const q = opts.raw ? text : await qualifySql(text, this.libl, this.curlib);
+    await this.ensureCommit();
+    return gw.sql(q, params, { client: this.client, tx: this.job.cmt?.tx });
   }
+
+  // ---------- Control de compromiso (STRCMTCTL / COMMIT / ROLLBACK) ----------
+  get commitLevel() { return this.job.cmt?.level || '*NONE'; }
+  async startCommit(level = '*CHG') {
+    if (this.job.cmt) throw new CLError('CPF8351', this.job.cmt.level);
+    if (level === '*NONE') return;
+    this.job.cmt = { level, tx: null, pending: 0, startedAt: Date.now() };
+  }
+  async ensureCommit() {
+    const c = this.job.cmt;
+    if (!c || c.tx) return;
+    c.tx = await gw.begin({ client: this.client, isolation: c.level });
+  }
+  async commit({ hold = false } = {}) {
+    const c = this.job.cmt;
+    if (!c || !c.tx) return { ok: true };
+    const r = await gw.commit(c.tx, { client: this.client });
+    c.tx = null;
+    return r;
+  }
+  async rollback() {
+    const c = this.job.cmt;
+    if (!c || !c.tx) return { ok: true };
+    const r = await gw.rollback(c.tx, { client: this.client });
+    c.tx = null;
+    return r;
+  }
+  async endCommit({ commit = false } = {}) {
+    if (!this.job.cmt) throw new CLError('CPF8356');
+    if (commit) await this.commit(); else await this.rollback();
+    this.job.cmt = null;
+  }
+}
+
+// Al terminar el trabajo con cambios pendientes: confirmación si termina con normalidad, retrotracción si no.
+export async function endJobCommit(job, normal = true) {
+  const c = job.cmt;
+  if (!c || !c.tx) { job.cmt = null; return; }
+  job.cmt = null;
+  const client = `${job.number}/${job.user}/${job.name}`;
+  await (normal ? gw.commit(c.tx, { client }) : gw.rollback(c.tx, { client })).catch(() => {});
 }
 
 const tableCache = new Map();
@@ -79,3 +127,5 @@ export async function qualifySql(sql, libl, curlib) {
   if (isCreate || /^\s*(DROP|ALTER)\b/i.test(masked)) invalidateTables();
   return out;
 }
+
+jobEndHooks.push((job, code) => { if (job.cmt) endJobCommit(job, code === 0); });

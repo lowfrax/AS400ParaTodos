@@ -12,7 +12,7 @@ const BLOCK_END = new Set(['ENDIF', 'ENDDO', 'ENDFOR', 'ENDSL', 'ENDMON', 'ENDSR
 const OPCODES = new Set(['IF', 'ELSEIF', 'ELSE', 'ENDIF', 'DOW', 'DOU', 'ENDDO', 'FOR', 'ENDFOR', 'SELECT', 'WHEN',
   'OTHER', 'ENDSL', 'ITER', 'LEAVE', 'LEAVESR', 'RETURN', 'BEGSR', 'ENDSR', 'EXSR', 'MONITOR', 'ON-ERROR', 'ENDMON',
   'DSPLY', 'CLEAR', 'RESET', 'EVAL', 'EVALR', 'EVAL-CORR', 'CALLP', 'SORTA', 'CALL$', 'MOVE$', 'MOVEL$',
-  '$UNSUPPORTED', 'END', 'DEALLOC', 'EXCEPT', ...FILE_OPS]);
+  '$UNSUPPORTED', 'END', 'DEALLOC', 'EXCEPT', 'COMMIT', 'ROLBK', ...FILE_OPS]);
 
 export function compileRpg(srcLines, { name = 'PGM', includeResolver } = {}) {
   const pre = preprocess(srcLines, includeResolver);
@@ -483,6 +483,11 @@ class Parser {
         return { op: 'return', expr: e, line };
       }
       case 'EXSR': { const n = this.is('special') ? this.next().value : this.name(); this.semi(); return { op: 'exsr', name: n, line }; }
+      case 'COMMIT': case 'ROLBK': {
+        if (!this.isOp(';')) this.expr(); // identificador de límite (COMMIT 'texto'): se ignora
+        this.semi();
+        return { op: op === 'COMMIT' ? 'commit' : 'rolbk', line, ext };
+      }
       case 'DSPLY': {
         let msg = null, msgq = null, resp = null;
         if (!this.isOp(';')) msg = this.expr();

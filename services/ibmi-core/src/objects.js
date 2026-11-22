@@ -26,7 +26,7 @@ const DDL = [
   `CREATE TABLE QSYS.SOURCE (LIB VARCHAR(10) NOT NULL, SRCF VARCHAR(10) NOT NULL, MBR VARCHAR(10) NOT NULL,
      SEQ DECIMAL(6, 2) NOT NULL, DAT DECIMAL(6, 0) NOT NULL DEFAULT 0, SRCDTA VARCHAR(240) NOT NULL DEFAULT '',
      PRIMARY KEY (LIB, SRCF, MBR, SEQ))`,
-  `CREATE TABLE QSYS.USRPRF (NAME VARCHAR(10) NOT NULL PRIMARY KEY, PWDHASH VARCHAR(128) NOT NULL DEFAULT '',
+  `CREATE TABLE QSYS.USRPRF (NAME VARCHAR(10) NOT NULL PRIMARY KEY, PWDHASH VARCHAR(128) NOT NULL DEFAULT '', PWDTOKEN VARCHAR(256) NOT NULL DEFAULT '',
      USRCLS VARCHAR(10) NOT NULL DEFAULT '*USER', TEXT VARCHAR(50) NOT NULL DEFAULT '', CURLIB VARCHAR(10) NOT NULL DEFAULT '*CRTDFT',
      INLMNU VARCHAR(10) NOT NULL DEFAULT 'MAIN', INLPGM VARCHAR(21) NOT NULL DEFAULT '*NONE', STATUS VARCHAR(10) NOT NULL DEFAULT '*ENABLED',
      CREATED TIMESTAMP, LASTSIGN TIMESTAMP, INVALID INTEGER NOT NULL DEFAULT 0, SIGNONS INTEGER NOT NULL DEFAULT 0)`,
@@ -74,6 +74,19 @@ export function hashPassword(user, pwd) {
   return crypto.createHash('sha256').update(`${user.toUpperCase()}:${String(pwd).toUpperCase()}:as400`).digest('hex');
 }
 
+// Token SHA-1 de IBM i (QPWDLVL 2/3) que usan los servidores host (jt400, ODBC, ACS): SHA1(usuario UTF-16BE de 10 + contraseña UTF-16BE).
+// Las contraseñas del sistema no distinguen mayúsculas, así que se guardan las variantes MAYÚSCULAS, minúsculas y Capitalizada.
+const utf16be = (s) => Buffer.from(String(s), 'utf16le').swap16();
+export function shaPasswordToken(user, pwd) {
+  return crypto.createHash('sha1').update(Buffer.concat([utf16be(String(user).toUpperCase().padEnd(10).slice(0, 10)), utf16be(String(pwd).trim())])).digest();
+}
+export function passwordTokens(user, pwd) {
+  const p = String(pwd ?? '').trim();
+  if (!p || p === '*NONE') return '';
+  const variants = [...new Set([p.toUpperCase(), p.toLowerCase(), p[0].toUpperCase() + p.slice(1).toLowerCase(), p])];
+  return variants.map((v) => shaPasswordToken(user, v).toString('hex')).join(',');
+}
+
 export async function initSchema() {
   const schemas = await gw.schemas();
   const names = new Set((Array.isArray(schemas) ? schemas : []).map((s) => s.name));
@@ -88,6 +101,12 @@ export async function initSchema() {
   const r = missing.length ? await gw.batch(missing, ['42710']) : { results: [] };
   const bad = r.results.find((x) => !x.ok);
   if (bad) throw new Error(`Error creando catálogo del sistema: ${bad.error}`);
+  // Migración: tokens SHA-1 de contraseña para los servidores host (versiones anteriores no tenían la columna)
+  const cols = await gw.columns('QSYS', 'USRPRF');
+  if (Array.isArray(cols) && !cols.some((c) => c.name === 'PWDTOKEN')) {
+    const r = await gw.sql(`ALTER TABLE QSYS.USRPRF ADD COLUMN PWDTOKEN VARCHAR(256) NOT NULL DEFAULT ''`);
+    if (r.error && r.sqlstate !== '42711') throw new Error(`QSYS.USRPRF: ${r.error}`);
+  }
   for (const [name, value, text] of SYSVALS) {
     const ex = await gw.rows(`SELECT NAME FROM QSYS.SYSVAL WHERE NAME = ?`, [name]);
     if (!ex.length) await gw.exec(`INSERT INTO QSYS.SYSVAL (NAME, SVALUE, TEXT) VALUES (?, ?, ?)`, [name, value, text]);
@@ -127,6 +146,8 @@ export async function deleteLibrary(lib) {
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ?`, [lib]);
+  // Entradas de las colas de datos de la biblioteca (QSYS.DTAQE existe desde el IPL)
+  await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB'`, [lib]);
 }
 export async function clearLibrary(lib) {
@@ -165,6 +186,7 @@ export async function deleteObject(lib, name, type) {
     await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ? AND SRCF = ?`, [lib, name]);
     await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ? AND SRCF = ?`, [lib, name]);
   }
+  if (type === '*DTAQ') await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ? AND NAME = ?`, [lib, name]);
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
 }
 
@@ -277,8 +299,8 @@ export async function getUser(name) {
 export async function listUsers() { return gw.rows(`SELECT NAME, USRCLS, TEXT, STATUS, CURLIB, LASTSIGN FROM QSYS.USRPRF ORDER BY NAME`); }
 export async function createUser({ name, password, usrcls = '*USER', text = '', curlib = '*CRTDFT', inlmnu = 'MAIN', inlpgm = '*NONE' }) {
   if (await getUser(name)) throw new CLError('CPF2214', name, 'QSYS', '*USRPRF');
-  await gw.exec(`INSERT INTO QSYS.USRPRF (NAME, PWDHASH, USRCLS, TEXT, CURLIB, INLMNU, INLPGM, STATUS, CREATED) VALUES (?, ?, ?, ?, ?, ?, ?, '*ENABLED', ?)`,
-    [name, password && password !== '*NONE' ? hashPassword(name, password) : '', usrcls, text, curlib, inlmnu, inlpgm, now()]);
+  await gw.exec(`INSERT INTO QSYS.USRPRF (NAME, PWDHASH, PWDTOKEN, USRCLS, TEXT, CURLIB, INLMNU, INLPGM, STATUS, CREATED) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '*ENABLED', ?)`,
+    [name, password && password !== '*NONE' ? hashPassword(name, password) : '', password && password !== '*NONE' ? passwordTokens(name, password) : '', usrcls, text, curlib, inlmnu, inlpgm, now()]);
   await putObject('QSYS', name, '*USRPRF', '', text, undefined, 'QSECOFR');
   await putObject('QUSRSYS', name, '*MSGQ', '', `Message queue for ${name}`, undefined, name);
 }

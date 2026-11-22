@@ -14,6 +14,17 @@ import { execFromLine } from './screens/common.js';
 import { compileObject } from './runtime/build.js';
 import { refreshMW } from './mw.js';
 import './commands/defs.js';
+import './commands/integration.js';
+import { initIfs, homeDir } from './ifs.js';
+import { initDtaq } from './dtaq.js';
+import { initMq } from './net/mq.js';
+import { initCatalogViews } from './sql/catalog.js';
+import { initNetwork } from './net/index.js';
+import { serverStatus, connections, netEvents } from './net/servers.js';
+import { outboundEvents, outboundLog } from './net/httpclient.js';
+import { auditEvents, auditEntries } from './svc/audit.js';
+import { httpLog } from './net/http/server.js';
+import { loadExtensions } from './extensions.js';
 import { SOURCES, CUSTOMERS, COMPILE_ORDER } from './seed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,6 +56,9 @@ async function ipl() {
     try {
       SYS.iplStep = 'Data Base Initialization';
       await obj.initSchema();
+      await initDtaq();
+      await initMq();
+      await initCatalogViews();
       SYS.iplStep = 'Commit Recovery';
       await seedUsers();
       SYS.iplStep = 'Start the Operating System';
@@ -57,6 +71,10 @@ async function ipl() {
       await new Promise((r) => setTimeout(r, 10000));
     }
   }
+  // Arranque de TCP/IP: TELNET, FTP, REXEC, HTTP (IWS/XMLSERVICE/REST), Mapepire, servidores host, core bancario…
+  SYS.iplStep = 'Start TCP/IP';
+  await loadExtensions();
+  await initNetwork({ attachSession }).catch((e) => console.error('[ipl] TCP/IP:', e));
   SYS.status = 'READY';
   SYS.iplStep = 'Complete';
   event('ipl', `IPL complete. System ${SYS.name} ${SYS.release} ready.`);
@@ -86,6 +104,16 @@ async function seedUsers() {
   ];
   for (const u of users) if (!(await obj.getUser(u.name))) await obj.createUser(u);
   if (!(await obj.getUser('QSYSOPR'))) await obj.createUser({ name: 'QSYSOPR', password: '*NONE', usrcls: '*SYSOPR', text: 'System Operator' });
+  // Perfiles de servidor sin contraseña (no pueden iniciar sesión): CGI (QTMHHTP1), trabajos de servidor (QUSER), TCP/IP (QTCP).
+  for (const [name, text] of [['QTMHHTP1', 'HTTP Server CGI user'], ['QUSER', 'Work station user'], ['QTCP', 'TCP/IP user']]) {
+    if (!(await obj.getUser(name))) await obj.createUser({ name, password: '*NONE', usrcls: '*USER', text, curlib: 'QGPL' });
+  }
+  for (const u of ['QSECOFR', 'QPGMR', 'DEMO']) homeDir(u);
+  // Tokens SHA-1 (servidores host) de los perfiles que siguen con su contraseña inicial
+  for (const u of await obj.listUsers()) {
+    const p = await obj.getUser(u.NAME);
+    if (p && !p.PWDTOKEN && p.PWDHASH && p.PWDHASH === obj.hashPassword(p.NAME, p.NAME)) await obj.updateUser(p.NAME, { PWDTOKEN: obj.passwordTokens(p.NAME, p.NAME) });
+  }
 }
 
 async function waitCompiler() {
@@ -153,6 +181,7 @@ async function runSession(session) {
       const { prf, job } = s;
       session.job = job;
       session.user = prf;
+      session.onJob?.(job);
       const ctx = new Ctx({ session, job, user: prf });
       event('signon', `${prf.NAME} signed on at ${session.device} (job ${job.number}).`);
       hub.broadcast('sessions', sessionList());
@@ -188,7 +217,7 @@ async function runSession(session) {
 
 function sessionList() {
   return [...sessions].map((s) => ({
-    device: s.device, remote: s.remote, user: s.job?.user || null, job: s.job ? `${s.job.number}/${s.job.user}/${s.job.name}` : null,
+    device: s.device, remote: s.remote, kind: s.kind, termType: s.termType, secure: s.secure, user: s.job?.user || null, job: s.job ? `${s.job.number}/${s.job.user}/${s.job.name}` : null,
     status: s.job?.status || 'SIGNON', function: s.job?.function || '', connectedAt: s.connectedAt, screens: s.screens, mw: s.mw,
   }));
 }
@@ -200,18 +229,35 @@ function jobList() {
   }));
 }
 
+/** Crea una sesión de pantalla 5250 para un terminal (web o TN5250) y la pone en marcha. */
+function attachSession(ws, remote, opts = {}) {
+  const session = new Session(ws, remote, opts);
+  event('connect', `Display ${session.device} connected from ${remote}${opts.kind === 'tn5250' ? ` (TN5250 ${opts.termType}${opts.tls ? ', TLS' : ''})` : ''}.`);
+  hub.broadcast('sessions', sessionList());
+  runSession(session);
+  return session;
+}
+
 // ---------- HTTP / WS ----------
 const app = createApp();
 app.get('/health', (req, res) => sendJson(res, 200, { status: SYS.status === 'READY' ? 'ready' : 'ipl', step: SYS.iplStep }));
 app.get('/api/status', (req, res) => sendJson(res, 200, { system: systemStatus(), sessions: sessionList(), jobs: jobList() }));
 app.get('/api/spool', async (req, res) => sendJson(res, 200, await obj.listSpool('*ALL').catch(() => [])));
+app.get('/api/network', (req, res) => sendJson(res, 200, { servers: serverStatus(), connections: connections(), outbound: outboundLog(50), http: httpLog.slice(-50), audit: auditEntries({ limit: 50 }) }));
 app.get('/events', (req, res) => hub.handle(req, res, [
   ['system', { ...systemStatus(), step: SYS.iplStep, detail: SYS.iplDetail, history: metrics.history.slice(-120) }],
   ['sessions', sessionList()], ['jobs', jobList()], ['events', events.slice(-50)],
+  ['network', { servers: serverStatus(), connections: connections() }], ['outbound', outboundLog(30)], ['audit', auditEntries({ limit: 30 })],
 ]));
+// Eventos de red en tiempo real para el panel
+netEvents.on('http', (e) => hub.broadcast('http', e));
+outboundEvents.on('request', (e) => hub.broadcast('outbound-one', e));
+auditEvents.on('entry', (e) => hub.broadcast('audit-one', e));
+netEvents.on('server', (e) => event('tcp', `${e.key} server ${e.active ? 'started' : 'ended'}.`));
 app.static('/_shared/', path.resolve(__dirname, '../../../shared/public'));
 app.static('/', path.resolve(__dirname, '../public'));
 
+initIfs();
 const server = app.listen(PORT, () => {
   console.log(`[core] IBM i core escuchando en http://localhost:${PORT} (panel: /dashboard/)`);
   ipl().catch((e) => { console.error('[ipl] error fatal', e); SYS.iplDetail = `IPL failed: ${e.message}`; });
@@ -219,10 +265,7 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocketServer({ server, path: '/ws' });
 wss.on('connection', (ws, req) => {
-  const session = new Session(ws, req.socket.remoteAddress);
-  event('connect', `Display ${session.device} connected from ${req.socket.remoteAddress}.`);
-  hub.broadcast('sessions', sessionList());
-  runSession(session);
+  attachSession(ws, (req.socket.remoteAddress || '').replace('::ffff:', ''), { kind: 'web' });
 });
 
 // Métricas y estado de los demás servicios
@@ -235,6 +278,7 @@ setInterval(() => {
   hub.broadcast('system', { ...systemStatus(), step: SYS.iplStep, detail: SYS.iplDetail, history: metrics.history.slice(-120), gateway: !!metrics.ext.gateway, compiler: !!metrics.ext.compiler, ended: endedJobs().slice(-10).map((j) => `${j.number}/${j.user}/${j.name}`) });
   hub.broadcast('jobs', jobList());
   hub.broadcast('sessions', sessionList());
+  hub.broadcast('network', { servers: serverStatus(), connections: connections() });
 }, 1000);
 setInterval(() => { if (SYS.status === 'READY') refreshMW(); }, 15000);
 

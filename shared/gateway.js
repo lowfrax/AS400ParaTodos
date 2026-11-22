@@ -7,7 +7,7 @@ export function createGateway(url, client) {
     url: base,
     async sql(sql, params = [], opts = {}) {
       try {
-        return await postJson(`${base}/sql`, { sql, params, client: opts.client || client }, opts.timeout || 60000);
+        return await postJson(`${base}/sql`, { sql, params, client: opts.client || client, tx: opts.tx || undefined }, opts.timeout || 60000);
       } catch (e) {
         return { error: `DB2 Gateway not reachable: ${e.message}`, sqlstate: '08001', sqlcode: -30081 };
       }
@@ -29,6 +29,14 @@ export function createGateway(url, client) {
     async batch(statements, ignore = ['42710']) {
       return postJson(`${base}/batch`, { statements, ignore, client, continueOnError: true }, 120000);
     },
+    // Control de compromiso
+    async begin(opts = {}) {
+      const r = await postJson(`${base}/tx/begin`, { client: opts.client || client, isolation: opts.isolation || '*CS' });
+      if (r.error) throw Object.assign(new Error(r.error), { sqlstate: r.sqlstate, sqlcode: r.sqlcode });
+      return r.tx;
+    },
+    async commit(tx, opts = {}) { return postJson(`${base}/tx/${encodeURIComponent(tx)}/commit`, { client: opts.client || client, keep: !!opts.keep }); },
+    async rollback(tx, opts = {}) { return postJson(`${base}/tx/${encodeURIComponent(tx)}/rollback`, { client: opts.client || client, keep: !!opts.keep }); },
     health: () => getJson(`${base}/health`, 3000),
     schemas: () => getJson(`${base}/catalog/schemas`),
     tables: (schema) => getJson(`${base}/catalog/tables?schema=${encodeURIComponent(schema)}`),

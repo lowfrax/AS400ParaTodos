@@ -371,7 +371,7 @@ def('CHGUSRPRF', 'Change User Profile', [
   if (!isSecofr(ctx) && a.USRPRF !== ctx.job.user) throw new CLError('CPF9898', 'Not authorized to change user profile.');
   if (!(await obj.getUser(a.USRPRF))) throw new CLError('CPF2204', a.USRPRF);
   const f = {};
-  if (a.PASSWORD !== '*SAME') f.PWDHASH = obj.hashPassword(a.USRPRF, a.PASSWORD);
+  if (a.PASSWORD !== '*SAME') { f.PWDHASH = obj.hashPassword(a.USRPRF, a.PASSWORD); f.PWDTOKEN = obj.passwordTokens(a.USRPRF, a.PASSWORD); }
   if (a.STATUS !== '*SAME') { f.STATUS = a.STATUS; if (a.STATUS === '*ENABLED') f.INVALID = 0; }
   for (const k of ['CURLIB', 'INLMNU', 'INLPGM', 'TEXT']) if (a[k] !== '*SAME') f[k] = a[k];
   await obj.updateUser(a.USRPRF, f);
@@ -397,7 +397,7 @@ def('CHGPWD', 'Change Password', [], async (ctx) => {
   const u = await obj.getUser(ctx.job.user);
   if (u.PWDHASH !== obj.hashPassword(ctx.job.user, r.fields.CUR.trim())) throw new CLError('CPF2362', 'Password not correct.');
   if (!r.fields.NEW.trim() || r.fields.NEW.trim() !== r.fields.VER.trim()) throw new CLError('CPF2363', 'New password and verify password do not match.');
-  await obj.updateUser(ctx.job.user, { PWDHASH: obj.hashPassword(ctx.job.user, r.fields.NEW.trim()) });
+  await obj.updateUser(ctx.job.user, { PWDHASH: obj.hashPassword(ctx.job.user, r.fields.NEW.trim()), PWDTOKEN: obj.passwordTokens(ctx.job.user, r.fields.NEW.trim()) });
   return msg('CPC2604');
 }, I);
 def('DLTUSRPRF', 'Delete User Profile', [P('USRPRF', 'User profile', 'name', 10, { req: true })], async (ctx, a) => {

@@ -90,6 +90,44 @@ const M = {
   CPD6A01: [30, 'Option &1 not valid.'],
   CPF1096: [30, 'Command PWRDWNSYS not allowed in this clone. Use docker compose down.'],
   CPI2601: [0, 'No spooled files found.'],
+  // Control de compromiso
+  CPC8351: [0, 'Commitment control started with lock level &1.'],
+  CPC8355: [0, 'Commitment control ended.'],
+  CPC8301: [0, 'Commit operation completed.'],
+  CPC8302: [0, 'Rollback operation completed.'],
+  CPF8350: [40, 'Commitment definition not found.', 'Commitment control was not started for the job.', 'Start commitment control (STRCMTCTL) before running the request.'],
+  CPF8351: [40, 'Commitment control already active with lock level &1.', 'STRCMTCTL was specified but commitment control is already active.', 'End commitment control (ENDCMTCTL) or continue with the active definition.'],
+  CPF8356: [40, 'Commitment control ended with &1 local changes not committed.'],
+  // Colas de datos
+  CPC9801: [0, 'Object &1 type &2 created in library &3.'],
+  CPF9502: [40, 'Error occurred while sending to or receiving from data queue &1 in &2: &3'],
+  CPF9503: [40, 'Data queue &1 in &2 is full or the entry is too long (maximum &3).'],
+  // TCP/IP
+  TCP1A0F: [0, '&1 server starting.'],
+  TCP1A10: [0, '&1 server ending.'],
+  TCP1A11: [30, '&1 server is already active.'],
+  TCP1A12: [30, '&1 server is not active.'],
+  TCP1A13: [40, 'Server &1 not valid. Valid values: &2.'],
+  TCP5090: [0, 'Email sent to &1 recipients.'],
+  TCP5091: [40, 'Email not sent: &1'],
+  // IFS
+  CPFA0A9: [40, 'Object not found.  Object is &1.', 'The object specified in the path name was not found.', 'Correct the path name and try the request again.'],
+  CPFA0A0: [40, 'Object already exists.  Object is &1.'],
+  CPFA0AB: [40, 'Operation failed for object.  Object is &1. &2'],
+  CPFA09C: [40, 'Not authorized to object.  Object is &1.'],
+  CPCA051: [0, 'Directory created.'],
+  CPCA052: [0, 'Directory removed.'],
+  CPCA056: [0, 'Object deleted. Object is &1.'],
+  CPCA058: [0, 'Object renamed.'],
+  CPCA081: [0, 'Current directory changed.'],
+  CPC2956: [0, '&1 records copied to stream file &2.'],
+  CPC2957: [0, '&1 records copied from stream file &2.'],
+  CPCA082: [0, 'Stream file copied to object.'],
+  CPCA083: [0, 'Object copied to stream file.'],
+  // Seguridad de servidores
+  CPF22E2: [40, 'Password not correct for user profile &1.'],
+  CPF22E3: [40, 'User profile &1 is disabled.'],
+  CPF2204S: [40, 'User profile &1 not found.'],
 };
 
 export function msgText(id, ...args) {

@@ -1,5 +1,6 @@
 // Lexer de RPG IV (ILE RPG) en formato libre, con soporte de columnas fijas convertido a libre.
 import { convertFixed } from './fixed.js';
+import { TO_UNI } from '../ebcdic.js';
 
 export class CompileError extends Error {
   constructor(msgId, message, line, severity = 30) {
@@ -155,8 +156,9 @@ export function tokenize(lines) {
       if (hex) {
         let out = '';
         for (let k = 0; k < s.length; k += 2) {
+          // Los literales hexadecimales son bytes EBCDIC (CCSID 37): x'40' = blanco, x'25' = LF, x'0D' = CR, x'C1' = 'A'.
           const b = parseInt(s.slice(k, k + 2), 16);
-          out += b === 0x40 ? ' ' : String.fromCharCode(b);
+          out += String.fromCharCode(TO_UNI[37][b]);
         }
         toks.push({ type: 'str', value: out, line });
       } else toks.push({ type: 'str', value: s, line });
