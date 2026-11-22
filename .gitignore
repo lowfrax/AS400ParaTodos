@@ -3,3 +3,5 @@ node_modules/
 .env
 .ifs/
 __pycache__/
+tests/jt400/jt400.jar
+tests/jt400/out/

@@ -101,7 +101,8 @@ export function createDb2Driver(cfg) {
         columns = meta.map((c) => ({
           name: c.SQL_DESC_NAME,
           type: String(c.SQL_DESC_TYPE_NAME || '').toUpperCase(),
-          precision: c.SQL_DESC_PRECISION,
+          // ibm_db devuelve SQL_DESC_PRECISION = 0: para DECIMAL/NUMERIC la precisión es el tamaño de visualización - 2 (signo y punto)
+          precision: c.SQL_DESC_PRECISION || (/^(DECIMAL|NUMERIC|DECFLOAT)$/i.test(String(c.SQL_DESC_TYPE_NAME)) ? Math.max(1, Number(c.SQL_DESC_DISPLAY_SIZE || 2) - 2) : Number(c.SQL_DESC_LENGTH || 0)),
           scale: c.SQL_DESC_SCALE,
           length: c.SQL_DESC_LENGTH,
           nullable: c.SQL_DESC_NULLABLE === undefined ? true : c.SQL_DESC_NULLABLE !== 0,

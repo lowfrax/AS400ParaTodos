@@ -9,7 +9,9 @@
     "stop": "docker compose down",
     "logs": "docker compose logs -f ibmi-core",
     "test": "node --no-warnings --test tests/language.test.mjs",
-    "test:e2e": "node tests/e2e.mjs"
+    "test:e2e": "node tests/e2e.mjs",
+    "test:connections": "node tests/connections.mjs",
+    "test:jt400": "bash tests/jt400/run.sh"
   },
   "engines": {
     "node": ">=22.5"
