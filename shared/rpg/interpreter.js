@@ -6,6 +6,14 @@ import {
 } from './types.js';
 
 import { runCycle, outputRecords, Printer, loadCtdata, zonedToNumber, zonedText, editWord } from './cycle.js';
+import { byteLen, encodeInto, decodeFrom, layout } from './bytes.js';
+import { toEbcdic, fromEbcdic } from '../ebcdic.js';
+
+// Disposición (desplazamientos) de una plantilla de DS, incluidas las anidadas
+function layoutDeep(tmpl, len) {
+  for (const f of tmpl) if (f.nested) layoutDeep(f.nested);
+  return layout(tmpl, { len: len || tmpl.$declLen });
+}
 
 export { RpgError };
 export class RpgCancel extends Error {
@@ -228,7 +236,7 @@ export class RpgProgram {
     return out;
   }
 
-  dsLen(tmpl) { return tmpl.reduce((a, f) => a + (f.nested ? this.dsLen(f.nested) : charLen(f.type)) * (f.dim || 1), 0); }
+  dsLen(tmpl) { return layoutDeep(tmpl); }
 
   async buildTemplate(d, scope) {
     if (d.likeds) {
@@ -251,33 +259,65 @@ export class RpgProgram {
       if (f.likeds) {
         const src = scope.lookup(f.likeds);
         if (!src || src.kind !== 'ds') throw new RpgError('00202', 'RNF7030', `Data structure ${f.likeds} is not defined.`);
-        tmpl.push({ name: f.name, nested: clone(src.tmpl), dim: f.dim ? this.constNumber(f.dim) : 0 });
+        tmpl.push({ name: f.name, nested: clone(src.tmpl), dim: f.dim ? this.constNumber(f.dim) : 0, pos: f.pos, overlay: f.overlay });
       } else {
         const type = this.resolveType(f.type, scope);
         let inz = null;
         if (f.inz) inz = coerce(type, await this.ev(f.inz, scope));
-        tmpl.push({ name: f.name, type, dim: f.dim ? this.constNumber(f.dim) : 0, inz });
+        tmpl.push({ name: f.name, type, dim: f.dim ? this.constNumber(f.dim) : 0, inz, pos: f.pos, overlay: f.overlay });
       }
     }
     return tmpl;
   }
 
-  makeInst(tmpl) {
+  /**
+   * Instancia de DS sobre un buffer de bytes con la representación de IBM i: los subcampos (con POS/OVERLAY o
+   * consecutivos) son vistas sobre ese buffer, de modo que se solapan como en un AS400 real.
+   * Sin INZ la DS empieza en blancos (X'40'): leer un numérico sin inicializar da error de datos decimales.
+   */
+  makeInst(tmpl, { buf, base = 0, inzAll = false } = {}) {
+    const total = layoutDeep(tmpl);
+    if (!buf) buf = Buffer.alloc(total, 0x40);
     const fields = new Map();
     for (const f of tmpl) {
       if (f.nested) {
         const sub = { kind: 'ds', name: f.name, qualified: true, tmpl: f.nested, dim: f.dim };
-        sub.inst = f.dim ? Array.from({ length: f.dim }, () => this.makeInst(f.nested)) : this.makeInst(f.nested);
+        const at = (i) => this.makeInst(f.nested, { buf, base: base + f.$off + i * f.$stride, inzAll });
+        sub.inst = f.dim ? Array.from({ length: f.dim }, (_, i) => at(i)) : at(0);
         fields.set(f.name, sub);
+        continue;
+      }
+      const init = f.inz !== null && f.inz !== undefined ? f.inz : undefined;
+      if (f.type.t === 'pointer' || f.type.t === 'like' || !byteLen(f.type)) {
+        const v0 = init !== undefined ? init : blank(f.type);
+        fields.set(f.name, { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: v0, value: f.dim ? Array.from({ length: f.dim }, () => v0) : v0 });
+        continue;
+      }
+      const fv = { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: init, ds: { buf, off: base + f.$off, stride: f.$stride } };
+      const t = f.type;
+      const offOf = (i) => base + f.$off + i * f.$stride;
+      if (f.dim) {
+        const n = f.dim;
+        Object.defineProperty(fv, 'value', {
+          enumerable: true,
+          get() {
+            const arr = Array.from({ length: n }, (_, i) => decodeFrom(buf, offOf(i), t, f.name));
+            return new Proxy(arr, { set(target, k, val) { target[k] = val; if (/^\d+$/.test(String(k))) encodeInto(buf, offOf(Number(k)), t, val); return true; } });
+          },
+          set(vals) { for (let i = 0; i < n; i++) encodeInto(buf, offOf(i), t, Array.isArray(vals) ? vals[i] : vals); },
+        });
       } else {
-        const init = f.inz !== null && f.inz !== undefined ? f.inz : blank(f.type);
-        fields.set(f.name, {
-          kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: init,
-          value: f.dim ? Array.from({ length: f.dim }, () => init) : init,
+        Object.defineProperty(fv, 'value', {
+          enumerable: true,
+          get() { return decodeFrom(buf, offOf(0), t, f.name); },
+          set(val) { encodeInto(buf, offOf(0), t, val); },
         });
       }
+      if (init !== undefined) fv.value = f.dim ? Array.from({ length: f.dim }, () => init) : init;
+      else if (inzAll) fv.value = f.dim ? Array.from({ length: f.dim }, () => blank(t)) : blank(t);
+      fields.set(f.name, fv);
     }
-    return { fields };
+    return { fields, buf, base, len: total };
   }
 
   async declare(d, scope) {
@@ -302,9 +342,11 @@ export class RpgProgram {
     }
     if (d.kind === 'ds') {
       const tmpl = await this.buildTemplate(d, scope);
+      if (d.len) tmpl.$declLen = this.constNumber(d.len);
       const dim = d.dim ? this.constNumber(d.dim) : 0;
       const v = { kind: 'ds', name: d.name, qualified: !!d.qualified || !!dim, tmpl, dim, template: d.template };
-      v.inst = dim ? Array.from({ length: dim }, () => this.makeInst(tmpl)) : this.makeInst(tmpl);
+      const inzAll = !!d.inz;
+      v.inst = dim ? Array.from({ length: dim }, () => this.makeInst(tmpl, { inzAll })) : this.makeInst(tmpl, { inzAll });
       if (d.name !== '*N') scope.vars.set(d.name, v);
       if (!v.qualified) for (const [n, f] of v.inst.fields) scope.vars.set(n, f);
     }
@@ -616,12 +658,14 @@ export class RpgProgram {
       var: v,
       get() {
         if (idx === undefined || idx === null) return v.value;
+        if (v.ds) return decodeFrom(v.ds.buf, v.ds.off + self.checkIdx(v, idx) * v.ds.stride, v.type, v.name);
         return v.value[self.checkIdx(v, idx)];
       },
       set(val, o) {
-        if (Array.isArray(v.value) && (idx === undefined || idx === null)) {
+        if (v.ds && idx !== undefined && idx !== null) { encodeInto(v.ds.buf, v.ds.off + self.checkIdx(v, idx) * v.ds.stride, v.type, coerce(v.type, val, o)); return; }
+        if (v.dim && (idx === undefined || idx === null)) {
           if (Array.isArray(val)) v.value = val.map((x) => coerce(v.type, x, o));
-          else v.value = v.value.map(() => coerce(v.type, val, o));
+          else { const cv = coerce(v.type, val, o); v.value = Array.from({ length: v.dim }, () => cv); }
           return;
         }
         if (idx === undefined || idx === null) v.value = coerce(v.type, val, o);
@@ -629,8 +673,9 @@ export class RpgProgram {
       },
       clear(reset) {
         const val = reset ? v.inzValue ?? blank(v.type) : blank(v.type);
-        if (Array.isArray(v.value) && (idx === undefined || idx === null)) v.value = v.value.map(() => val);
+        if (v.dim && (idx === undefined || idx === null)) v.value = Array.from({ length: v.dim }, () => val);
         else if (idx === undefined || idx === null) v.value = val;
+        else if (v.ds) encodeInto(v.ds.buf, v.ds.off + self.checkIdx(v, idx) * v.ds.stride, v.type, val);
         else v.value[self.checkIdx(v, idx)] = val;
       },
     };
@@ -638,7 +683,7 @@ export class RpgProgram {
 
   checkIdx(v, idx) {
     const i = Math.trunc(toNumber(idx));
-    const n = Array.isArray(v.value) ? v.value.length : Array.isArray(v.inst) ? v.inst.length : 0;
+    const n = v.dim ? v.dim : Array.isArray(v.inst) ? v.inst.length : Array.isArray(v.value) ? v.value.length : 0;
     if (i < 1 || i > n) throw new RpgError('00121', 'RNX0121', `An array index is out of range (${i}).`);
     return i - 1;
   }
@@ -660,6 +705,7 @@ export class RpgProgram {
   }
 
   dsString(inst, tmpl) {
+    if (inst.buf) return fromEbcdic(inst.buf, 37, inst.base, inst.base + inst.len);
     let s = '';
     for (const f of tmpl) {
       const fv = inst.fields.get(f.name);
@@ -675,6 +721,12 @@ export class RpgProgram {
   }
 
   splitInto(inst, tmpl, str) {
+    if (inst.buf) {
+      // Asignar a la DS completa: los bytes del valor (EBCDIC) rellenos con blancos
+      const s = String(str).padEnd(inst.len).slice(0, inst.len);
+      toEbcdic(s).copy(inst.buf, inst.base);
+      return;
+    }
     let pos = 0;
     for (const f of tmpl) {
       const fv = inst.fields.get(f.name);
@@ -705,11 +757,13 @@ export class RpgProgram {
         continue;
       }
       const val = fig ? figValue(fv.type, fig) : reset ? fv.inzValue ?? blank(fv.type) : blank(fv.type);
-      fv.value = Array.isArray(fv.value) ? fv.value.map(() => val) : val;
+      fv.value = fv.dim ? Array.from({ length: fv.dim }, () => val) : val;
     }
   }
 
   copyInst(src, dst) {
+    // DS = DS: copia de bytes cuando ambas tienen la misma longitud (como el MOVE de IBM i)
+    if (src.buf && dst.buf && src.len === dst.len) { src.buf.copy(dst.buf, dst.base, src.base, src.base + src.len); return; }
     for (const [n, f] of src.fields) {
       const t = dst.fields.get(n);
       if (!t) continue;
@@ -1148,12 +1202,17 @@ export class RpgProgram {
         return toStr(v).length;
       }
       case '%SIZE': {
-        const { v, t } = await this.typed(a[0], sc);
-        if (t) {
-          if (t.t === 'packed') return Math.floor(t.digits / 2) + 1;
-          if (t.t === 'int' || t.t === 'uns') return t.bits / 8;
-          return charLen(t);
+        // %SIZE no lee el dato: sólo su tipo (un numérico sin inicializar no da error)
+        const all = a[1] && a[1].k === 'sp' && a[1].v === '*ALL';
+        if (['id', 'dot', 'idx', 'call'].includes(a[0].k) && (a[0].k !== 'call' || sc.lookup(a[0].name))) {
+          const p = await this.place(a[0], sc);
+          if (p.dsvar) return this.dsLen(p.dsvar.tmpl) * (all && p.dsvar.dim ? p.dsvar.dim : 1);
+          if (p.type) {
+            const sz = p.type.t === 'varchar' ? p.type.len + 2 : byteLen(p.type) || charLen(p.type);
+            return sz * (all && p.var && p.var.dim ? p.var.dim : 1);
+          }
         }
+        const { v } = await this.typed(a[0], sc);
         return toStr(v).length;
       }
       case '%ELEM': {

@@ -174,7 +174,7 @@ class Parser {
       case 'VARCHAR': case 'VARGRAPH': case 'VARUCS2': return { t: 'varchar', len: n(0, 1) };
       case 'PACKED': return { t: 'packed', digits: n(0, 15), dec: n(1, 0) };
       case 'ZONED': return { t: 'zoned', digits: n(0, 15), dec: n(1, 0) };
-      case 'BINDEC': return { t: 'packed', digits: n(0, 9), dec: n(1, 0) };
+      case 'BINDEC': return n(1, 0) ? { t: 'packed', digits: n(0, 9), dec: n(1, 0) } : { t: 'int', bits: n(0, 9) <= 4 ? 16 : n(0, 9) <= 9 ? 32 : 64 };
       case 'INT': return { t: 'int', bits: bitsOf(n(0, 10)) };
       case 'UNS': return { t: 'uns', bits: bitsOf(n(0, 10)) };
       case 'FLOAT': return { t: 'float' };

@@ -313,3 +313,87 @@ test('RPG III: IFxx/ELSE/END, DOWxx, CASxx, SELEC/WHxx/OTHER y MOVEL sin relleno
   const { msgs } = await runSrc(src);
   assert.deepEqual(msgs.map((m) => m.trim()), ['CHICOE', 'DOS', 'TRES', 'OTRO', 'CUATRO']);
 });
+
+test('estructuras de datos como en IBM i: OVERLAY/POS/*NEXT, zona de signo, empaquetado, arrays solapados y error decimal', async () => {
+  const src = `**FREE
+dcl-ds fecha;
+  fec char(8) inz('20261122');
+  anio char(4) overlay(fec);
+  mes  char(2) overlay(fec:5);
+  dia  char(2) overlay(fec:*next);
+end-ds;
+dcl-ds num;
+  numc char(5);
+  numz zoned(5:0) overlay(numc);
+end-ds;
+dcl-ds pk;
+  pkc char(3);
+  pkv packed(5:0) pos(1);
+end-ds;
+dcl-ds arr;
+  tabla char(6) inz('ABCDEF');
+  letra char(1) dim(6) overlay(tabla);
+end-ds;
+dcl-ds sininz;
+  n packed(5:0);
+end-ds;
+dcl-ds coninz inz;
+  m packed(5:0);
+  c char(3);
+end-ds;
+dsply anio + '/' + mes + '/' + dia;
+numc = '00123';
+dsply %char(numz);
+numz = -45;
+dsply numc;
+pkv = 12345;
+dsply %char(%len(pkc)) + ' ' + %char(%size(pk)) + ' ' + %char(%size(pkv));
+letra(3) = 'z';
+dsply tabla;
+monitor;
+  dsply %char(n + 1);
+on-error 907;
+  dsply 'decimal';
+endmon;
+dsply %char(m + 1) + '[' + c + ']';
+fecha = '19991231';
+dsply dia;
+pkc = x'00123F';
+dsply %char(pkv);
+*inlr = *on;`;
+  const { msgs } = await runSrc(src.split('\n'));
+  assert.deepEqual(msgs, ['2026/11/22', '123', '0004N', '3 3 3', 'ABzDEF', 'decimal', '1[   ]', '31', '123']);
+});
+
+test('DS en columnas fijas: RPG IV con posiciones en bytes (P/B) y RPG III con I-specs', async () => {
+  const src4 = [
+    L('D', { 7: 'REC', 24: 'DS' }),
+    L('D', { 7: 'CODE', 26: '      1', 33: '      3' }),
+    L('D', { 7: 'AMT', 26: '      4', 33: '      8', 40: 'P', 41: ' 2' }),
+    L('D', { 7: 'QTY', 26: '      9', 33: '     10', 40: 'B', 41: ' 0' }),
+    L('C', { 26: 'EVAL', 36: 'AMT = 123.45' }),
+    L('C', { 26: 'EVAL', 36: 'QTY = 7' }),
+    L('C', { 26: 'EVAL', 36: "CODE = 'ABC'" }),
+    L('C', { 26: 'EVAL', 36: "*INLR = *ON" }),
+    L('C', { 12: 'AMT', 26: 'DSPLY' }),
+    L('C', { 26: 'EVAL', 36: "CODE = %CHAR(%SIZE(REC))" }),
+    L('C', { 12: 'CODE', 26: 'DSPLY' }),
+  ];
+  const r4 = await runSrc(src4, { dialect: 'RPG4' });
+  assert.deepEqual(r4.msgs.map((m) => m.trim()), ['123.45', '10']);
+  const src3 = [
+    L('I', { 7: 'DATOS', 19: 'DS' }),
+    L('I', { 44: '   1', 48: '   8', 53: 'FECHA' }),
+    L('I', { 44: '   1', 48: '   4', 53: 'ANIO' }),
+    L('I', { 44: '   5', 48: '   6', 53: 'MES' }),
+    L('I', { 44: '   7', 48: '   8', 52: '0', 53: 'DIA' }),
+    L('C', { 28: 'MOVE', 33: "'20260131'", 43: 'FECHA' }),
+    L('C', { 18: 'ANIO', 28: 'DSPLY' }),
+    L('C', { 18: 'MES', 28: 'DSPLY' }),
+    L('C', { 18: 'DIA', 28: 'ADD', 33: '1', 43: 'SIG', 49: '  2', 52: '0' }),
+    L('C', { 18: 'SIG', 28: 'DSPLY' }),
+    L('C', { 28: 'SETON', 54: 'LR' }),
+  ];
+  const r3 = await runSrc(src3);
+  assert.deepEqual(r3.msgs.map((m) => m.trim()), ['2026', '01', '32']);
+});

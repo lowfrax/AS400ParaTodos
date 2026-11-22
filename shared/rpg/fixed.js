@@ -298,7 +298,12 @@ export function convertFixed(lines, { dialect = 'RPG4' } = {}) {
       const dec = col(s, 41, 42);
       let kw = col(s, 44, 80);
       let len = to;
-      if (from && to) { len = String(Number(to) - Number(from) + 1); if (!/POS\(/i.test(kw)) kw = `POS(${from}) ${kw}`; }
+      if (from && to) {
+        const bytes = Number(to) - Number(from) + 1;
+        // Con posiciones desde/hasta la longitud es en bytes: P → 2n-1 dígitos, B → 4/9, I/U → 3/5/10/20, F → 4/8
+        len = String(t === 'P' ? bytes * 2 - 1 : t === 'B' ? (bytes <= 2 ? 4 : 9) : t === 'I' || t === 'U' ? ({ 1: 3, 2: 5, 4: 10, 8: 20 }[bytes] || 10) : bytes);
+        if (!/POS\(/i.test(kw)) kw = `POS(${from}) ${kw}`;
+      }
       if (['DS', 'PR', 'PI', 'S', 'C'].includes(decl)) closeBlock(line);
       if (decl === 'DS') {
         if (ext === 'E' && !/EXTNAME/i.test(kw)) kw = `EXTNAME(${name}) ${kw}`;
