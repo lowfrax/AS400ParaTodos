@@ -12,7 +12,8 @@
     "test:e2e": "node tests/e2e.mjs",
     "test:connections": "node tests/connections.mjs",
     "test:jt400": "bash tests/jt400/run.sh",
-    "test:rpg": "node tests/rpg-e2e.mjs"
+    "test:rpg": "node tests/rpg-e2e.mjs",
+    "test:ile": "node tests/ile-e2e.mjs"
   },
   "engines": {
     "node": ">=22.5"

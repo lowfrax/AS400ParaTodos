@@ -15,6 +15,7 @@ import { compileObject } from './runtime/build.js';
 import { refreshMW } from './mw.js';
 import './commands/defs.js';
 import './commands/integration.js';
+import './commands/ile.js';
 import { initIfs, homeDir } from './ifs.js';
 import { initDtaq } from './dtaq.js';
 import { initMq } from './net/mq.js';

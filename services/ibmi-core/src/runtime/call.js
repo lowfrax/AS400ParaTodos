@@ -8,6 +8,7 @@ import { Panel } from '../panel.js';
 import { displayFormat } from './dspf.js';
 import { runCl } from './clrun.js';
 import { callSystemProc, systemProgram } from './sysapi.js';
+import { resolveBound } from './ile.js';
 
 const programCache = new Map(); // `${lib}/${name}` -> {changed, data}
 
@@ -45,7 +46,7 @@ export async function callProgram(ctx, name, lib, refs = []) {
     if (data.kind === 'CL') {
       await runCl(ctx, name, data.ir, refs);
     } else {
-      await runRpg(ctx, o, name, key, data.ir, refs);
+      await runRpg(ctx, { ...o, $modules: data.modules || [], $entry: data.entmod }, name, key, data.ir, refs);
     }
   } finally {
     job.function = prevFn;
@@ -76,6 +77,8 @@ function makeHost(ctx, pgmName) {
       } catch (e) { return { error: e.message, sqlstate: e.sqlstate || '2D521', sqlcode: e.sqlcode ?? -751 }; }
     },
     callProc: (n, args, places) => callSystemProc(ctx, n, args, places),
+    // ILE: símbolos de otros módulos del programa y de los programas de servicio enlazados
+    resolveBound: (sym, prog) => resolveBound(ctx, prog, sym, (ir, nm) => new RpgProgram(ir, makeHost(ctx, nm))),
     // Archivo de impresora descrito externamente (CRTPRTF); null si no existe o no tiene DDS
     async describePrinter(n) {
       const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
@@ -133,6 +136,18 @@ async function runRpg(ctx, o, name, key, ir, refs) {
   if (entry) prog = entry;
   else {
     prog = new RpgProgram(JSON.parse(JSON.stringify(ir)), makeHost(ctx, name));
+    // Programa ILE con varios módulos (CRTPGM): cada módulo tiene su propio almacenamiento estático
+    if (o && o.$modules && o.$modules.length) {
+      const unit = { modules: new Map([[o.$entry || name, prog]]) };
+      prog.$unit = unit;
+      for (const m of o.$modules) {
+        const mir = JSON.parse(JSON.stringify(m.ir));
+        mir.$bind = ir.$bind || [];
+        const mp = new RpgProgram(mir, makeHost(ctx, name));
+        mp.$unit = unit;
+        unit.modules.set(m.name, mp);
+      }
+    }
   }
   try {
     const r = await prog.call(refs);

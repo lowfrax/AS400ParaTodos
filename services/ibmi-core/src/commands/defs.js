@@ -218,15 +218,22 @@ def('WRKMBRPDM', 'Work with Members using PDM', [
 const compileDef = (name, title, type, kw = 'PGM', srcDft = 'QRPGLESRC', extra = []) => def(name, title, [
   LIBQ(kw, kw === 'FILE' ? 'File' : kw === 'OBJ' ? 'Object' : 'Program', { lib: '*CURLIB', libChoices: 'Name, *CURLIB' }),
   LIBQ('SRCFILE', 'Source file', { req: false, dft: srcDft }),
-  P('SRCMBR', 'Source member', 'name', 10, { dft: kw === 'FILE' ? '*FILE' : '*PGM', choices: 'Name, *PGM' }),
+  P('SRCMBR', 'Source member', 'name', 10, { dft: kw === 'FILE' ? '*FILE' : kw === 'MODULE' ? '*MODULE' : '*PGM', choices: 'Name, *PGM' }),
   P('TEXT', "Text 'description'", 'text', 50, { dft: '*SRCMBRTXT' }),
   ...extra,
 ], async (ctx, a) => compileObject(ctx, {
   type: type || null, obj: a[kw], srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE === '*YES',
+  module: name === 'CRTRPGMOD' || (name === 'CRTSQLRPGI' && a.OBJTYPE === '*MODULE'), bnddir: a.BNDDIR, bndsrvpgm: a.BNDSRVPGM,
 }));
-compileDef('CRTBNDRPG', 'Create Bound RPG Program', 'RPGLE');
+const BND = [
+  P('DFTACTGRP', 'Default activation group', 'char', 4, { dft: '*YES', choices: '*YES, *NO' }),
+  P('ACTGRP', 'Activation group', 'name', 10, { dft: '*STGMDL', choices: 'Name, *STGMDL, *NEW, *CALLER' }),
+  P('BNDDIR', 'Binding directory', 'list', 60, { dft: '*NONE' }),
+];
+compileDef('CRTBNDRPG', 'Create Bound RPG Program', 'RPGLE', 'PGM', 'QRPGLESRC', BND);
+compileDef('CRTRPGMOD', 'Create RPG Module', 'RPGLE', 'MODULE', 'QRPGLESRC');
 compileDef('CRTRPGPGM', 'Create RPG Program', 'RPG', 'PGM', 'QRPGSRC');
-compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ');
+compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ', 'QRPGLESRC', [P('OBJTYPE', 'Compile type', 'name', 10, { dft: '*PGM', choices: '*PGM, *MODULE, *SRVPGM' }), ...BND]);
 compileDef('CRTBNDCL', 'Create Bound CL Program', 'CLLE', 'PGM', 'QCLLESRC');
 
 // CVTRPGSRC: RPG III / RPG/400 / RPG II → ILE RPG (RPG IV) en columnas fijas

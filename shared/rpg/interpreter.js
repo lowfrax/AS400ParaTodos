@@ -1055,6 +1055,14 @@ export class RpgProgram {
         await this.host.callProgram(pr.extpgm.toUpperCase(), refs);
         return undefined;
       }
+      // Procedimiento de otro módulo o de un programa de servicio enlazado
+      if (this.host.resolveBound) {
+        const t = await this.host.resolveBound(pr.extproc || name, this);
+        if (t) {
+          const r = await t.prog.callProc(t.proc, args, sc, this);
+          return r === undefined || !pr.returns ? r : coerce(this.resolveType(pr.returns, this.globals), r);
+        }
+      }
       // Procedimiento externo de sistema conocido
       if (this.host.callProc) {
         const vals = [];
@@ -1070,10 +1078,16 @@ export class RpgProgram {
         return r === undefined || !pr.returns ? r : coerce(this.resolveType(pr.returns, this.globals), r);
       }
     }
+    // Sin prototipo: procedimiento exportado por un módulo o programa de servicio enlazado
+    if (this.host.resolveBound) {
+      const t = await this.host.resolveBound(name, this);
+      if (t) return t.prog.callProc(t.proc, args, sc, this);
+    }
     throw new RpgError('00211', 'RNX0211', `Program or procedure ${name} is not defined.`);
   }
 
-  async callProc(proc, args, sc) {
+  // caller: programa (módulo) que hace la llamada; los argumentos se evalúan en su contexto
+  async callProc(proc, args, sc, caller = this) {
     const local = new Scope(this.globals);
     const back = [];
     for (let i = 0; i < proc.params.length; i++) {
@@ -1084,7 +1098,7 @@ export class RpgProgram {
         continue;
       }
       if (!type) {
-        const src = await this.place(args[i], sc);
+        const src = await caller.place(args[i], sc);
         const tmpl = (this.globals.lookup(p.type.name) || {}).tmpl || (src.dsvar && src.dsvar.tmpl) || [];
         const v = { kind: 'ds', name: p.name, qualified: true, tmpl, inst: this.makeInst(tmpl) };
         if (src.inst) this.copyInst(src.inst, v.inst);
@@ -1094,14 +1108,14 @@ export class RpgProgram {
       }
       const dim = p.dim ? this.constNumber(p.dim) : 0;
       if (!p.value && !p.const) {
-        const ref = await this.place(args[i], sc);
+        const ref = await caller.place(args[i], sc);
         const v = { kind: 's', name: p.name, type, dim };
         const cur = ref.get();
         v.value = dim ? (Array.isArray(cur) ? cur.map((x) => coerce(type, x)) : Array(dim).fill(blank(type))) : coerce(type, cur);
         local.vars.set(p.name, v);
         back.push(() => ref.set(v.value));
       } else {
-        const val = await this.ev(args[i], sc);
+        const val = await caller.ev(args[i], sc);
         local.vars.set(p.name, {
           kind: 's', name: p.name, type, dim,
           value: dim ? (Array.isArray(val) ? val.map((x) => coerce(type, x)) : Array(dim).fill(blank(type))) : coerce(type, val),

@@ -5,6 +5,11 @@ import { CLError, msg, msgText } from '../messages.js';
 import { createJob, endJob, logJob, setStatus, qualifiedJob, sysDate, sysTime } from '../system.js';
 import { invalidateTables } from '../ctx.js';
 import { refreshMW } from '../mw.js';
+import { bindModules, importsOf } from './ile.js';
+
+// Nombres cualificados de una lista (LIB/NOMBRE o NOMBRE)
+export const qualList = (v) => (Array.isArray(v) ? v : String(v || '').split(/\s+/)).map((x) => String(x).replace(/[()']/g, '').trim()).filter((x) => x && x !== '*NONE')
+  .map((x) => { const [l, n] = x.includes('/') ? x.split('/') : [null, x]; return { lib: l && l !== '*LIBL' ? l.toUpperCase() : null, name: n.toUpperCase() }; });
 
 const COMPILER = process.env.COMPILER_URL || 'http://localhost:5251';
 
@@ -19,7 +24,7 @@ export async function compileObject(ctx, o) {
   const objLib = ctx.resolveLib(o.obj.lib === '*LIBL' ? '*CURLIB' : o.obj.lib);
   const name = o.obj.obj;
   const srcfile = o.srcfile.obj || SRC_FOR[o.type] || 'QRPGLESRC';
-  const mbrName = !o.srcmbr || o.srcmbr === '*PGM' || o.srcmbr === '*FILE' || o.srcmbr === '*OBJ' ? name : o.srcmbr;
+  const mbrName = !o.srcmbr || o.srcmbr === '*PGM' || o.srcmbr === '*FILE' || o.srcmbr === '*OBJ' || o.srcmbr === '*MODULE' ? name : o.srcmbr;
   const mi = await findMember(gw, o.srcfile.lib === '*LIBL' ? null : ctx.resolveLib(o.srcfile.lib), srcfile, mbrName, ctx.libl);
   if (!mi) throw new CLError('CPF9815', mbrName, srcfile, o.srcfile.lib);
   // CRTRPGPGM compila RPG/400 (RPG), RPG/38 y RPG II (RPG36) según el tipo del miembro
@@ -87,6 +92,26 @@ export async function compileObject(ctx, o) {
     }
     await putObject(objLib, name, '*FILE', 'PRTF', text, { ...r.object.data, pagesize: o.pagesize || [66, 132], ovrflw: o.ovrflw || 60 }, ctx.job.user);
     return [msg('CPC7301', name, objLib)];
+  }
+  // ILE: CRTRPGMOD crea un *MODULE; CRTBNDRPG enlaza las importaciones del módulo (BNDDIR de CTL-OPT o del mandato)
+  if (o.module && r.object.data && r.object.data.kind === 'RPG') {
+    await putObject(objLib, name, '*MODULE', r.object.attr, text, { kind: 'RPG', ir: r.object.data.ir, module: true }, ctx.job.user);
+    const dm = new Date();
+    return [{ id: 'RNS9305', text: `Module ${name} placed in library ${objLib}. ${String(r.severity).padStart(2, '0')} highest severity. Created on ${sysDate(dm)} at ${sysTime(dm)}.`, sev: 0 }];
+  }
+  if (r.object.data && r.object.data.kind === 'RPG') {
+    const ir = r.object.data.ir;
+    if (ir.ctl && ir.ctl.NOMAIN) {
+      logJob(ctx.job, 'RNF0143', '*DIAG', `Module ${name} has no main procedure (NOMAIN); use CRTRPGMOD and CRTSRVPGM.`, { sev: 30 });
+      throw new CLError('CPF5D0B', `Program entry procedure module not found; program ${name} not created in library ${objLib}.`);
+    }
+    const bnddir = [...qualList((ir.ctl && ir.ctl.BNDDIR) || []), ...qualList(o.bnddir || [])];
+    if (importsOf(ir).length || bnddir.length) {
+      const res = await bindModules(ctx, { modules: [{ name, lib: objLib, ir }], bnddir, bndsrvpgm: qualList(o.bndsrvpgm || []), self: { lib: objLib, name } });
+      ir.$bind = res.bind.filter((b) => !(b.kind === 'module' && b.name === name));
+      const extra = res.modules.filter((m) => m.name !== name);
+      if (extra.length) { r.object.data.modules = extra.map((m) => ({ name: m.name, lib: m.lib, ir: m.ir })); r.object.data.entmod = name; }
+    }
   }
   await putObject(objLib, name, r.object.type, r.object.attr, text, r.object.data, ctx.job.user);
   // Las activaciones en caché del programa anterior dejan de ser válidas.

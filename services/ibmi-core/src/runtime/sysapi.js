@@ -194,6 +194,9 @@ async function delay(ctx, ms) {
   } finally { ctx.job.status = prev; }
 }
 
+/** ¿Es un procedimiento del sistema (servicios de IBM enlazados por omisión: QC2LE, QZHBCGI, QTCP…)? */
+export function isSystemProc(name) { return !!PROCS[String(name || '').toUpperCase()]; }
+
 export async function callSystemProc(ctx, name, args, places = []) {
   const fn = PROCS[String(name || '').toUpperCase()];
   if (!fn) throw new RpgError('00211', 'RNX0211', `Program or procedure ${name} is not defined.`);
