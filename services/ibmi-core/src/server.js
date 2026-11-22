@@ -17,6 +17,8 @@ import './commands/defs.js';
 import './commands/integration.js';
 import './commands/ile.js';
 import './commands/msgf.js';
+import './commands/ovr.js';
+import { startScheduler } from './commands/util.js';
 import { initIfs, homeDir } from './ifs.js';
 import { initDtaq } from './dtaq.js';
 import { initMq } from './net/mq.js';
@@ -80,6 +82,7 @@ async function ipl() {
   SYS.status = 'READY';
   SYS.iplStep = 'Complete';
   event('ipl', `IPL complete. System ${SYS.name} ${SYS.release} ready.`);
+  startScheduler();
   console.log(`[ipl] Sistema ${SYS.name} listo. Terminal 5250: http://localhost:${PORT}/`);
 }
 

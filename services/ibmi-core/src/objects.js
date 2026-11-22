@@ -267,12 +267,13 @@ export async function writeMember(lib, file, mbr, lines) {
 }
 
 // ---------- Spool ----------
-export async function createSpool(job, name, lines, { usrdta = '', outq = 'PRT01', pageLen = 60 } = {}) {
+export async function createSpool(job, name, lines, { usrdta = '', outq = 'PRT01', pageLen = 60, hold = false } = {}) {
+  outq = outq || 'PRT01';
   const id = await nextId('SPLF');
   job.spoolSeq = (job.spoolSeq || 0) + 1;
   const pages = Math.max(1, Math.ceil(lines.length / (pageLen || 60)));
   await gw.exec(`INSERT INTO QSYS.SPLF (ID, NAME, JOBNAME, JOBUSER, JOBNBR, SPLNBR, USRDTA, OUTQ, STATUS, PAGES, NLINES, CREATED, DATA)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RDY', ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${hold ? "'HLD'" : "'RDY'"}, ?, ?, ?, ?)`,
   [id, name.slice(0, 10), job.name, job.user, job.number, job.spoolSeq, usrdta.slice(0, 10), outq, pages, lines.length, now(), lines.join('\n')]);
   return id;
 }

@@ -9,6 +9,7 @@ import { displayFormat } from './dspf.js';
 import { runCl } from './clrun.js';
 import { callSystemProc, systemProgram } from './sysapi.js';
 import { resolveBound } from './ile.js';
+import { enterCall, leaveCall, overrideFor } from './overrides.js';
 
 const programCache = new Map(); // `${lib}/${name}` -> {changed, data}
 
@@ -42,6 +43,7 @@ export async function callProgram(ctx, name, lib, refs = []) {
   const prevFn = job.function;
   setStatus(job, 'RUN', `PGM-${name}`);
   ctx.pgmMsgs = [];
+  enterCall(job);
   try {
     if (data.kind === 'CL') {
       await runCl(ctx, name, data.ir, refs);
@@ -50,8 +52,17 @@ export async function callProgram(ctx, name, lib, refs = []) {
     }
   } finally {
     job.function = prevFn;
+    // Las alteraciones (OVRDBF/OVRPRTF) del nivel de llamada del programa terminan con él
+    leaveCall(job);
   }
   return ctx.pgmMsgs;
+}
+
+// OVRDBF POSITION(*END|*START): posición inicial del archivo abierto
+function withPosition(desc, f) {
+  const pos = desc.override && desc.override.position ? String(desc.override.position).toUpperCase() : '';
+  if (pos.startsWith('*END')) { f.lower = { none: true }; f.upper = { all: true }; f.idx = Infinity; }
+  return f;
 }
 
 function makeHost(ctx, pgmName) {
@@ -60,11 +71,16 @@ function makeHost(ctx, pgmName) {
   const printers = [];
   const host = {
     user: job.user,
-    describeFile: (n) => describeFile(gw, n, ctx.libl).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); }),
-    openDisk: (desc) => new DiskFile({
+    // OVRDBF FILE(n) TOFILE(lib/arch): el programa abre el archivo alterado
+    describeFile: (n) => {
+      const ov = overrideFor(job, 'DB', String(n).replace(/^.*\//, ''));
+      const target = ov && ov.tofile && ov.tofile !== '*FILE' ? ov.tofile : n;
+      return describeFile(gw, target, ctx.libl).then((d) => (ov ? { ...d, override: ov } : d)).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); });
+    },
+    openDisk: (desc) => withPosition(desc, new DiskFile({
       name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys, keyDesc: desc.keyDesc, rrn: desc.rrn,
       sql: async (t, p) => { await ctx.ensureCommit(); return gw.sql(t, p, { client, tx: job.cmt?.tx }); },
-    }),
+    })),
     // SET OPTION COMMIT / COMMIT / ROLLBACK (SQL) y COMMIT / ROLBK (RPG)
     async sqlControl(verb, o = {}) {
       try {
@@ -81,6 +97,8 @@ function makeHost(ctx, pgmName) {
     resolveBound: (sym, prog) => resolveBound(ctx, prog, sym, (ir, nm) => new RpgProgram(ir, makeHost(ctx, nm))),
     // Archivo de impresora descrito externamente (CRTPRTF); null si no existe o no tiene DDS
     async describePrinter(n) {
+      const ovp = overrideFor(job, 'PRT', String(n).replace(/^.*\//, ''));
+      if (ovp && ovp.tofile) n = ovp.tofile;
       const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
       const fo = await findObject(gw, nm, '*FILE', lib, ctx.libl);
       const d = fo ? await objectData(gw, fo.LIB, nm, '*FILE') : null;
@@ -117,10 +135,17 @@ function makeHost(ctx, pgmName) {
       }
     },
     openPrinter(name, len, { pageLen } = {}) {
+      // OVRPRTF: cola de salida, nombre del archivo en spool, datos de usuario, retención y longitud de página
+      const ov = overrideFor(job, 'PRT', name) || {};
+      if (ov.pagelen) pageLen = ov.pagelen;
       const lines = [];
       const h = {
         write: (line) => lines.push(String(line).slice(0, len).replace(/\s+$/, '')),
-        close: async () => { if (lines.length) { await createSpool(job, name, lines.splice(0), { usrdta: pgmName, pageLen }); } },
+        close: async () => {
+          if (!lines.length) return;
+          const data = lines.splice(0);
+          for (let c = 0; c < (ov.copies || 1); c++) await createSpool(job, ov.splfname || name, data, { usrdta: ov.usrdta || pgmName, pageLen, outq: ov.outq, hold: ov.hold });
+        },
       };
       printers.push(h);
       return h;

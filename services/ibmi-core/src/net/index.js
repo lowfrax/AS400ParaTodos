@@ -6,6 +6,7 @@ import { ftpServerDef } from './ftp.js';
 import { rexecServerDef } from './rexec.js';
 import { httpServerDef } from './http/server.js';
 import { mapepireServerDef } from './mapepire.js';
+import { sshServerDef } from './ssh.js';
 import { tlsCredentials } from './tls.js';
 
 const extra = [];
@@ -14,6 +15,6 @@ export function addServer(defFactory) { extra.push(defFactory); }
 
 export async function initNetwork(api) {
   const full = { tls: tlsCredentials, upgradeHandlers: [], ...api };
-  for (const f of [telnetServerDef, ftpServerDef, rexecServerDef, httpServerDef, mapepireServerDef, ...extra]) defineServer(f(full));
+  for (const f of [telnetServerDef, ftpServerDef, rexecServerDef, sshServerDef, httpServerDef, mapepireServerDef, ...extra]) defineServer(f(full));
   await startAll();
 }
