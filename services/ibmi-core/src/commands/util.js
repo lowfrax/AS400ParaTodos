@@ -336,17 +336,19 @@ def('ADDJOBSCDE', 'Add Job Schedule Entry', [
   P('FRQ', 'Frequency', 'name', 8, { req: true, choices: '*ONCE, *WEEKLY, *MONTHLY' }),
   P('SCDDATE', 'Schedule date', 'name', 10, { dft: '*CURRENT', choices: 'Date, *CURRENT, *MONTHSTR, *MONTHEND, *NONE' }),
   P('SCDDAY', 'Schedule day', 'list', 40, { dft: '*NONE', choices: '*NONE, *ALL, *MON, *TUE, *WED, *THU, *FRI, *SAT, *SUN' }),
-  P('SCDTIME', 'Schedule time', 'name', 8, { dft: '*CURRENT' }),
+  P('SCDTIME', 'Schedule time', 'char', 8, { dft: '*CURRENT', choices: 'Time, *CURRENT' }),
   P('JOBQ', 'Job queue', 'qual', 10, { dft: 'QBATCH' }), P('USER', 'User', 'name', 10, { dft: '*CURRENT' }), TEXT,
 ], async (ctx, a) => {
   const d = await scdData();
   const name = up(a.JOB);
-  const t = up(a.SCDTIME) === '*CURRENT' ? (() => { const n = new Date(Date.now() + 60000); return `${String(n.getHours()).padStart(2, '0')}${String(n.getMinutes()).padStart(2, '0')}00`; })() : String(a.SCDTIME).replace(/[:.]/g, '').padEnd(6, '0');
+  // SCDTIME(*CURRENT): la hora actual; con SCDDATE(*CURRENT) el trabajo se envía en el siguiente ciclo del planificador
+  const nowTime = up(a.SCDTIME) === '*CURRENT';
+  const t = nowTime ? (() => { const n = new Date(); return [n.getHours(), n.getMinutes(), n.getSeconds()].map((x) => String(x).padStart(2, '0')).join(''); })() :String(a.SCDTIME).replace(/[:.]/g, '').padEnd(6, '0');
   const e = {
     name, seq: ++d.seq, cmd: a.CMD, frq: a.FRQ, date: parseScdDate(a.SCDDATE), days: [].concat(a.SCDDAY || '*NONE').filter((x) => x !== '*NONE'),
     time: t, user: a.USER === '*CURRENT' ? ctx.job.user : up(a.USER), status: 'SCD', text: textVal(a.TEXT), created: new Date().toISOString(), last: null,
   };
-  e.next = nextRun(e);
+  e.next = nowTime && e.frq === '*ONCE' && (e.date === '*CURRENT' || e.date === '*NONE') ? new Date().toISOString() : nextRun(e);
   d.entries.push(e);
   await saveScd(d);
   return [{ id: 'CPC1238', text: `Job schedule entry ${name} number ${String(e.seq).padStart(6, '0')} added.`, sev: 0 }];
@@ -378,12 +380,107 @@ def('RLSJOBSCDE', 'Release Job Schedule Entry', SCDE, async (ctx, a) => {
   await saveScd(d);
   return [{ id: 'CPC1241', text: `${list.length} job schedule entries released.`, sev: 0 }];
 });
+const fmtNext = (iso) => (iso ? `${sysDate(new Date(iso))} ${sysTime(new Date(iso))}` : '');
+const fmtTime = (t) => `${t.slice(0, 2)}:${t.slice(2, 4)}:${t.slice(4, 6)}`;
+const nbr = (e) => String(e.seq).padStart(6, '0');
+function scdDetail(e) {
+  return [
+    `Job  . . . . . . . . . . . . . . :   ${e.name}`, `Entry number . . . . . . . . . . :   ${nbr(e)}`, `Status . . . . . . . . . . . . . :   ${e.status}`,
+    `Command  . . . . . . . . . . . . :   ${e.cmd}`, `Frequency  . . . . . . . . . . . :   ${e.frq}`, `Schedule date  . . . . . . . . . :   ${e.date}`,
+    `Schedule day . . . . . . . . . . :   ${e.days.length ? e.days.join(' ') : '*NONE'}`, `Schedule time  . . . . . . . . . :   ${fmtTime(e.time)}`,
+    `Next submit date . . . . . . . . :   ${fmtNext(e.next)}`, `Last submitted . . . . . . . . . :   ${fmtNext(e.last)}`,
+    `User . . . . . . . . . . . . . . :   ${e.user}`, 'Job queue  . . . . . . . . . . . :   QGPL/QBATCH', `Text . . . . . . . . . . . . . . :   ${e.text || ''}`,
+  ];
+}
+
 def('WRKJOBSCDE', 'Work with Job Schedule Entries', [P('JOB', 'Job name', 'name', 10, { dft: '*ALL' })], async (ctx, a) => {
-  const d = await scdData();
-  const rows = d.entries.filter((e) => up(a.JOB) === '*ALL' || e.name === up(a.JOB));
-  const fmt = (iso) => (iso ? `${sysDate(new Date(iso))} ${sysTime(new Date(iso))}` : '');
-  return { text: ['Job         Status  Frequency  Schedule Time  Next Submit Date     Command', ...rows.map((e) => `${e.name.padEnd(12)}${e.status.padEnd(8)}${e.frq.padEnd(11)}${`${e.time.slice(0, 2)}:${e.time.slice(2, 4)}:${e.time.slice(4, 6)}`.padEnd(15)}${fmt(e.next).padEnd(21)}${String(e.cmd).slice(0, 40)}`)].join('\n') };
+  const sel = up(a.JOB);
+  const load = async () => (await scdData()).entries.filter((e) => sel === '*ALL' || e.name === sel || (sel.endsWith('*') && e.name.startsWith(sel.slice(0, -1))));
+  if (!ctx.interactive) {
+    const rows = await load();
+    return { text: ['Job         Number  Status  Frequency  Schedule Time  Next Submit Date     Command', ...rows.map((e) => `${e.name.padEnd(12)}${nbr(e).padEnd(8)}${e.status.padEnd(8)}${e.frq.padEnd(11)}${fmtTime(e.time).padEnd(15)}${fmtNext(e.next).padEnd(21)}${String(e.cmd).slice(0, 40)}`)].join('\n') };
+  }
+  const { workWith, viewText, execFromLine } = await import('../screens/common.js');
+  const change = async (list, status) => {
+    const d = await scdData();
+    for (const s of list) { const e = d.entries.find((x) => x.seq === s.seq); if (e) { e.status = status; if (status === 'SCD') e.next = nextRun(e); } }
+    await saveScd(d);
+  };
+  await workWith(ctx, {
+    fn: 'CMD-WRKJOBSCDE',
+    title: 'Work with Job Schedule Entries',
+    opts: ['2=Change   3=Hold   4=Remove   5=Display details   6=Release'],
+    colHead2: '                                   -----Schedule------',
+    colHead: 'Opt  Job         Status   Date      Time      Frequency    Next Submit',
+    load,
+    key: (e) => e.seq,
+    row: (e) => `${e.name.padEnd(10)}  ${e.status.padEnd(7)}  ${(e.date === '*NONE' || !e.date ? 'USER DEF' : e.date).slice(0, 8).padEnd(8)}  ${fmtTime(e.time)}  ${e.frq.padEnd(11)}  ${e.next ? sysDate(new Date(e.next)) : ''}`,
+    empty: '(No job schedule entries)',
+    cmd: false,
+    keys: { F6: (c) => execFromLine(c, 'ADDJOBSCDE', true) },
+    fkeys: ['F3=Exit   F5=Refresh   F6=Add   F12=Cancel'],
+    act: async (sels, c) => {
+      for (const s of sels) {
+        if (s.opt === '2') { const m = await execFromLine(c, `CHGJOBSCDE JOB(${s.item.name}) ENTRYNBR(${s.item.seq})`, true); if (m && m.text) return m; }
+        if (s.opt === '5') await viewText(c, { fn: 'CMD-WRKJOBSCDE', title: 'Display Job Schedule Entry Details', lines: scdDetail(s.item) });
+      }
+      const by = (o) => sels.filter((s) => s.opt === o).map((s) => s.item);
+      if (by('3').length) await change(by('3'), 'HLD');
+      if (by('6').length) await change(by('6'), 'SCD');
+      if (by('4').length) { const d = await scdData(); const rm = new Set(by('4').map((e) => e.seq)); d.entries = d.entries.filter((e) => !rm.has(e.seq)); await saveScd(d); }
+      return null;
+    },
+  });
+  return null;
 });
+
+def('CHGJOBSCDE', 'Change Job Schedule Entry', [
+  ...SCDE, P('CMD', 'Command to run', 'cmd', 512, { dft: '*SAME' }), P('FRQ', 'Frequency', 'name', 8, { dft: '*SAME', choices: '*SAME, *ONCE, *WEEKLY, *MONTHLY' }),
+  P('SCDDATE', 'Schedule date', 'name', 10, { dft: '*SAME' }), P('SCDDAY', 'Schedule day', 'list', 40, { dft: '*SAME' }),
+  P('SCDTIME', 'Schedule time', 'char', 8, { dft: '*SAME' }), P('TEXT', "Text 'description'", 'text', 50, { dft: '*SAME' }),
+], async (ctx, a) => {
+  const { d, list } = await scdEntries(a);
+  const same = (v) => v === undefined || v === '*SAME' || (Array.isArray(v) && v[0] === '*SAME');
+  for (const e of list) {
+    if (!same(a.CMD)) e.cmd = a.CMD;
+    if (!same(a.FRQ)) e.frq = a.FRQ;
+    if (!same(a.SCDDATE)) e.date = parseScdDate(a.SCDDATE);
+    if (!same(a.SCDDAY)) e.days = [].concat(a.SCDDAY).filter((x) => x !== '*NONE');
+    if (!same(a.SCDTIME)) e.time = String(a.SCDTIME).replace(/[:.]/g, '').padEnd(6, '0');
+    if (!same(a.TEXT)) e.text = textVal(a.TEXT);
+    if (e.status === 'SCD') e.next = nextRun(e);
+  }
+  await saveScd(d);
+  return [{ id: 'CPC1235', text: `Job schedule entry ${list[0].name} number ${nbr(list[0])} changed.`, sev: 0 }];
+});
+
+// Entradas del planificador anterior (/QIBM/UserData/OS/jobscde.json) y entrada por omisión del cierre del banco
+async function migrateScd() {
+  const d = await scdData();
+  let changed = false;
+  const OLD = '/QIBM/UserData/OS/jobscde.json';
+  try {
+    const old = JSON.parse(String(await ifs.readFile(OLD)));
+    for (const o of Array.isArray(old) ? old : []) {
+      if (o.status === 'SCD-DONE' || d.entries.some((e) => e.name === o.job)) continue;
+      const e = {
+        name: o.job, seq: ++d.seq, cmd: o.cmd, frq: o.frq, date: o.scddate || '*NONE', days: (o.scdday || []).filter((x) => x !== '*NONE'),
+        time: String(o.scdtime || '000000'), user: o.user || 'QSECOFR', status: o.status === 'HLD' ? 'HLD' : 'SCD', text: o.text || '', created: o.created || new Date().toISOString(), last: null,
+      };
+      e.next = nextRun(e);
+      d.entries.push(e);
+    }
+    await ifs.rename(OLD, `${OLD}.migrated`).catch(() => {});
+    changed = true;
+  } catch { /* no había planificador anterior */ }
+  if (!d.entries.some((e) => e.name === 'CIERREBNK')) {
+    const e = { name: 'CIERREBNK', seq: ++d.seq, cmd: 'CALL PGM(BANCO/BNKCIERRE)', frq: '*WEEKLY', date: '*NONE', days: ['*ALL'], time: '230000', user: 'QSECOFR', status: 'HLD', text: 'Cierre diario del banco', created: new Date().toISOString(), last: null };
+    e.next = nextRun(e);
+    d.entries.push(e);
+    changed = true;
+  }
+  if (changed) await saveScd(d);
+}
 
 /** Bucle del planificador (QSYSSCD): envía los trabajos que han llegado a su hora. */
 export function startScheduler() {
@@ -399,7 +496,8 @@ export function startScheduler() {
         const ctx = await serverCtx(e.user, { name: 'QSYSSCD', subsystem: 'QCTL', type: 'BCH' }).catch(() => null);
         if (ctx) {
           await submitJob(ctx, e.cmd, e.name).catch(() => {});
-          logJob(ctx.job, 'CPI1E23', '*INFO', `Job ${e.name} submitted by job schedule entry ${String(e.seq).padStart(6, '0')}.`);
+          logJob(ctx.job, 'CPI1E23', '*INFO', `Job ${e.name} submitted by job schedule entry ${nbr(e)}.`);
+          console.log(`[scd] ${e.name} ${nbr(e)}: ${e.cmd}`);
           setTimeout(() => endServerCtx(ctx), 2000);
         }
         e.last = now.toISOString();
@@ -410,7 +508,8 @@ export function startScheduler() {
       if (changed) { d.entries = d.entries.filter((x) => x.status !== 'SAV'); await saveScd(d); }
     } catch { /* el siguiente ciclo lo reintenta */ }
   };
-  const t = setInterval(tick, Number(process.env.JOBSCD_INTERVAL_MS || 30000));
+  migrateScd().catch((e) => console.error(`[scd] ${e.message}`));
+  const t = setInterval(tick, Number(process.env.JOBSCD_INTERVAL_MS || 15000));
   t.unref();
   return t;
 }

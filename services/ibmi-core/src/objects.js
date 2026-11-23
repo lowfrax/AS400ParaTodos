@@ -1,13 +1,32 @@
 // Acceso al "sistema de objetos" del IBM i almacenado en Db2.
 import crypto from 'node:crypto';
 import { createGateway } from '../../../shared/gateway.js';
-import { describeFile, findObject, objectData, readMember, findMember } from '../../../shared/catalog.js';
+import { describeFile, findObject as findCatalogObject, objectData, readMember, findMember } from '../../../shared/catalog.js';
 import { CLError } from './messages.js';
 
 export const gw = createGateway(process.env.GATEWAY_URL || 'http://localhost:5252', 'ibmi-core');
-export { describeFile, findObject, objectData, readMember, findMember };
+export { describeFile, objectData, readMember, findMember };
 
 export const SYSTEM_LIBS = ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'];
+
+/**
+ * Busca un objeto en QSYS.OBJECTS. Una tabla o vista creada con SQL (también por DRDA/JDBC directo a Db2) es un *FILE
+ * desde el momento en que existe, como en IBM i: si no se encuentra un *FILE se registran las tablas SQL de las
+ * bibliotecas de usuario buscadas y se repite la búsqueda.
+ */
+export async function findObject(g, name, type, lib, libl = []) {
+  const o = await findCatalogObject(g, name, type, lib, libl);
+  if (o || type !== '*FILE') return o;
+  const libs = (!lib || lib === '*LIBL' ? libl : [lib]).filter((l) => l && !SYSTEM_LIBS.includes(l));
+  if (!libs.length) return null;
+  for (const l of libs) await syncSqlTables(l).catch(() => {});
+  return findCatalogObject(g, name, type, lib, libl);
+}
+
+/** Tras un DROP TABLE/VIEW por SQL el objeto *FILE deja de existir. */
+export async function forgetSqlObject(lib, name) {
+  await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = '*FILE' AND ATTR IN ('PF', 'PF-DTA', 'LF')`, [lib, name]).catch(() => {});
+}
 // Marca de tiempo en hora local del sistema (como QDATE/QTIME), formato Db2 'YYYY-MM-DD HH:MM:SS.ffffff'.
 const now = () => {
   const d = new Date();

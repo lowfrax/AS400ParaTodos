@@ -14,7 +14,9 @@
     "test:jt400": "bash tests/jt400/run.sh",
     "test:rpg": "node tests/rpg-e2e.mjs",
     "test:ile": "node tests/ile-e2e.mjs",
-    "test:msg": "node tests/msg-e2e.mjs"
+    "test:msg": "node tests/msg-e2e.mjs",
+    "test:ssh": "node tests/ssh-e2e.mjs",
+    "test:util": "node tests/util-e2e.mjs"
   },
   "engines": {
     "node": ">=22.5"

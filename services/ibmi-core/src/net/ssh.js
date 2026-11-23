@@ -181,7 +181,12 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
   sftp.on('RENAME', async (reqid, a, b) => { try { await ifs.rename(abs(a), abs(b)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
   sftp.on('READLINK', (reqid) => sftp.status(reqid, STATUS_CODE.OP_UNSUPPORTED));
   sftp.on('SYMLINK', (reqid) => sftp.status(reqid, STATUS_CODE.OP_UNSUPPORTED));
-  sftp.on('end', async () => { for (const x of handles.values()) if (x.kind === 'file') await x.fh.close().catch(() => {}); });
+  // EOF del cliente ('bye'): cerrar los archivos abiertos y el canal, o el cliente espera indefinidamente
+  sftp.on('end', async () => {
+    for (const x of handles.values()) if (x.kind === 'file') await x.fh.close().catch(() => {});
+    handles.clear();
+    sftp.end();
+  });
 }
 
 // Shell interactiva: eco, retroceso y ejecución por líneas en QSH
@@ -267,8 +272,9 @@ function handleClient(client, info, ctl, conn) {
         const sh = new Qsh(ctx);
         shellSession(stream, sh, !!pty, (code) => { stream.exit(code || 0); stream.end(); });
       });
-      session.on('subsystem', async (acc, rej, i) => {
-        if (i.name !== 'sftp') return rej();
+      // ssh2 solo crea el servidor SFTP si hay oyente de 'sftp' (con 'subsystem' entrega un canal sin protocolo)
+      session.on('subsystem', (acc, rej) => rej && rej());
+      session.on('sftp', (acc) => {
         const sftp = acc();
         sftpSession(sftp, ctx, prf.NAME, ssh2.utils.sftp);
         tagConnection(conn, { user: prf.NAME, job: ctx.job, detail: 'SFTP' });

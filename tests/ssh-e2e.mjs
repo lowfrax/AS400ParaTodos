@@ -58,7 +58,7 @@ const ssh = (cmd) => spawnSync(SSH, [...opts, `${USER.toLowerCase()}@127.0.0.1`,
   const batch = path.join(dir, 'batch.txt');
   const back = path.join(dir, 'vuelta.txt');
   fs.writeFileSync(batch, [
-    'cd /tmp', `put ${local.replace(/\\/g, '/')} sftp_ifs.txt`, 'ls -l',
+    '-rmdir /tmp/dirsftp', 'cd /tmp', `put ${local.replace(/\\/g, '/')} sftp_ifs.txt`, 'ls -l',
     `put ${local.replace(/\\/g, '/')} /QSYS.LIB/SFTPLIB.LIB/QRPGLESRC.FILE/HOLA.MBR`,
     'ls /QSYS.LIB/SFTPLIB.LIB/QRPGLESRC.FILE', `get /tmp/sftp_ifs.txt ${back.replace(/\\/g, '/')}`, 'mkdir /tmp/dirsftp', 'rmdir /tmp/dirsftp', 'bye',
   ].join('\n'));

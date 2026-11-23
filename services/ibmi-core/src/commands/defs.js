@@ -76,7 +76,17 @@ def('DSPJOB', 'Display Job', [], async (ctx) => { await dspjoblog(ctx); }, I);
 def('WRKJOB', 'Work with Job', [], async (ctx) => { await dspjoblog(ctx); }, I);
 
 // ---------- Lista de bibliotecas ----------
-def('DSPLIBL', 'Display Library List', [P('OUTPUT', 'Output', 'char', 6, { dft: '*' })], async (ctx) => { await dsplibl(ctx); }, I);
+// OUTPUT(*) en un trabajo por lotes (o OUTPUT(*PRINT)) imprime la lista en QPRTLIBL, como en IBM i; QSH 'system' la ve en stdout
+def('DSPLIBL', 'Display Library List', [P('OUTPUT', 'Output', 'char', 6, { dft: '*', choices: '*, *PRINT' })], async (ctx, a) => {
+  if (ctx.interactive && a.OUTPUT !== '*PRINT') { await dsplibl(ctx); return null; }
+  const text = new Map((await obj.libraries()).map((l) => [l.NAME, l.TEXT]));
+  const sys = ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'];
+  const lines = ['                                     Library List', '', '  Library     Type      Text Description',
+    ...ctx.libl.map((l) => `  ${l.padEnd(10)}  ${(sys.includes(l) ? 'SYS' : l === ctx.job.curlib ? 'CUR' : 'USR').padEnd(8)}  ${text.get(l) || ''}`.replace(/\s+$/, '')),
+    '', '                         * * * * *  E N D  O F  L I S T I N G  * * * * *'];
+  await obj.createSpool(ctx.job, 'QPRTLIBL', lines, { usrdta: 'DSPLIBL' });
+  return { text: lines.join('\n') };
+});
 def('CHGCURLIB', 'Change Current Library', [P('CURLIB', 'Current library', 'name', 10, { req: true, choices: 'Name, *CRTDFT' })], async (ctx, a) => {
   if (a.CURLIB === '*CRTDFT') ctx.job.curlib = null;
   else { await requireLib(ctx, a.CURLIB); ctx.job.curlib = a.CURLIB; }

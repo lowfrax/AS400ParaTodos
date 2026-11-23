@@ -113,7 +113,8 @@ export async function mkdir(p, { parents = false } = {}) {
 export async function rmdir(p, { recursive = false } = {}) {
   const r = real(p);
   if (r === IFS_ROOT) throw new CLError('CPFA09C', p);
-  try { await fsp.rm(r, { recursive, force: false }); } catch (e) {
+  // fsp.rm sin recursive rechaza cualquier directorio (ERR_FS_EISDIR): un directorio vacío se borra con rmdir
+  try { await (recursive ? fsp.rm(r, { recursive: true, force: false }) : fsp.rmdir(r)); } catch (e) {
     if (e.code === 'ENOENT') throw new CLError('CPFA0A9', p);
     if (e.code === 'ENOTEMPTY' || e.code === 'EEXIST') throw new CLError('CPFA0AB', p, 'Directory not empty.');
     throw new CLError('CPFA0AB', p, e.message);

@@ -2,7 +2,6 @@
 //  *SNMP  agente SNMP v1/v2c (UDP 161): MIB-II system + Host Resources (CPU, memoria, trabajos) para Nagios/Zabbix/PRTG.
 //  *NTP   servidor SNTP (UDP 123): los clientes pueden sincronizar la hora con el sistema.
 //  *LPD   servidor de impresión LPD/LPR (TCP 515): otros sistemas imprimen en colas de salida (spool) del IBM i.
-//  Planificador de trabajos: ADDJOBSCDE / WRKJOBSCDE / RMVJOBSCDE / HLDJOBSCDE / RLSJOBSCDE.
 import dgram from 'node:dgram';
 import net from 'node:net';
 import os from 'node:os';
@@ -10,10 +9,6 @@ import { addServer } from './index.js';
 import { listen } from './telnet.js';
 import { SYS, systemStatus, allJobs, createJob, endJob } from '../system.js';
 import { createSpool, getUser } from '../objects.js';
-import { def } from '../commands/registry.js';
-import { CLError } from '../messages.js';
-import { Panel, padR } from '../panel.js';
-import * as ifs from '../ifs.js';
 
 // ======================= SNMP =======================
 const T = { INT: 0x02, STR: 0x04, NULL: 0x05, OID: 0x06, SEQ: 0x30, IP: 0x40, COUNTER: 0x41, GAUGE: 0x42, TICKS: 0x43, NOSUCH: 0x80, END: 0x82 };
@@ -226,106 +221,8 @@ function lpdDef() {
   };
 }
 
-// ======================= Planificador de trabajos =======================
-const SCDE_FILE = '/QIBM/UserData/OS/jobscde.json';
-async function loadScde() { try { return JSON.parse((await ifs.readFile(SCDE_FILE)).toString('utf8')); } catch { return []; } }
-async function saveScde(e) { await ifs.writeFile(SCDE_FILE, JSON.stringify(e, null, 2)); }
-const DAYS = ['*SUN', '*MON', '*TUE', '*WED', '*THU', '*FRI', '*SAT'];
-
-function due(e, now) {
-  if (e.status === 'HLD') return false;
-  const hhmm = `${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
-  if (String(e.scdtime).slice(0, 4) !== hhmm) return false;
-  const stamp = `${now.toISOString().slice(0, 10)}T${hhmm}`;
-  if (e.lastRun === stamp) return false;
-  if (e.frq === '*ONCE') return !e.lastRun && (!e.scddate || e.scddate === '*CURRENT' || e.scddate === now.toISOString().slice(0, 10));
-  if (e.frq === '*MONTHLY') return Number(e.scddate?.slice(-2) || 1) === now.getDate();
-  const days = e.scdday || ['*ALL'];
-  return days.includes('*ALL') || days.includes(DAYS[now.getDay()]);
-}
-
-function startScheduler() {
-  setInterval(async () => {
-    const list = await loadScde();
-    const now = new Date();
-    let changed = false;
-    for (const e of list) {
-      if (!due(e, now)) continue;
-      e.lastRun = `${now.toISOString().slice(0, 10)}T${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
-      changed = true;
-      try {
-        const { serverCtx, endServerCtx } = await import('../svc/jobs.js');
-        const { submitJob } = await import('../runtime/build.js');
-        const ctx = await serverCtx(e.user || 'QSECOFR', { name: 'QJOBSCD', subsystem: 'QCTL', type: 'BCH' });
-        await submitJob(ctx, e.cmd, e.job);
-        setTimeout(() => endServerCtx(ctx), 2000);
-        console.log(`[scd] ${e.job}: ${e.cmd}`);
-      } catch (err) { console.error(`[scd] ${e.job}: ${err.message}`); }
-      if (e.frq === '*ONCE') e.status = 'SCD-DONE';
-    }
-    if (changed) await saveScde(list);
-  }, 20000).unref();
-}
-
-const P = (kw, prompt, type, len, o = {}) => ({ kw, prompt, type, len, ...o });
-def('ADDJOBSCDE', 'Add Job Schedule Entry', [
-  P('JOB', 'Job name', 'name', 10, { req: true }), P('CMD', 'Command to run', 'cmd', 512, { req: true, promptLen: 120 }),
-  P('FRQ', 'Frequency', 'char', 8, { req: true, choices: '*ONCE, *WEEKLY, *MONTHLY', values: ['*ONCE', '*WEEKLY', '*MONTHLY'] }),
-  P('SCDDATE', 'Schedule date', 'char', 10, { dft: '*NONE', choices: 'Date, *CURRENT, *NONE' }), P('SCDDAY', 'Schedule day', 'list', 40, { dft: '*NONE', choices: '*NONE, *ALL, *MON…' }),
-  P('SCDTIME', 'Schedule time', 'char', 8, { dft: '*CURRENT', choices: 'HHMMSS' }), P('USER', 'User', 'name', 10, { dft: '*CURRENT' }), P('TEXT', "Text 'description'", 'text', 50, { dft: '*BLANK' }),
-], async (ctx, a) => {
-  const list = await loadScde();
-  if (list.some((e) => e.job === a.JOB)) throw new CLError('CPF1628', `Job schedule entry ${a.JOB} already exists.`);
-  const t = a.SCDTIME === '*CURRENT' ? `${String(new Date().getHours()).padStart(2, '0')}${String(new Date().getMinutes() + 1).padStart(2, '0')}00` : String(a.SCDTIME).replace(/[:.]/g, '').padEnd(6, '0');
-  const days = a.SCDDAY.filter((d) => d !== '*NONE');
-  list.push({ job: a.JOB, cmd: a.CMD, frq: a.FRQ, scddate: a.SCDDATE, scdday: days.length ? days : ['*ALL'], scdtime: t, user: a.USER === '*CURRENT' ? ctx.job.user : a.USER, text: a.TEXT === '*BLANK' ? '' : a.TEXT, status: 'SCD', created: new Date().toISOString() });
-  await saveScde(list);
-  return { id: 'CPC1238', text: `Job schedule entry ${a.JOB} number 000001 added.` };
-});
-def('RMVJOBSCDE', 'Remove Job Schedule Entry', [P('JOB', 'Job name', 'name', 10, { req: true })], async (ctx, a) => {
-  const list = await loadScde();
-  const n = list.filter((e) => e.job !== a.JOB);
-  if (n.length === list.length) throw new CLError('CPF1629', `Job schedule entry ${a.JOB} not found.`);
-  await saveScde(n);
-  return { id: 'CPC1239', text: `Job schedule entry ${a.JOB} removed.` };
-});
-for (const [cmd, st, txt] of [['HLDJOBSCDE', 'HLD', 'held'], ['RLSJOBSCDE', 'SCD', 'released']]) {
-  def(cmd, `${txt === 'held' ? 'Hold' : 'Release'} Job Schedule Entry`, [P('JOB', 'Job name', 'name', 10, { req: true })], async (ctx, a) => {
-    const list = await loadScde();
-    const e = list.find((x) => x.job === a.JOB);
-    if (!e) throw new CLError('CPF1629', `Job schedule entry ${a.JOB} not found.`);
-    e.status = st;
-    await saveScde(list);
-    return { text: `Job schedule entry ${a.JOB} ${txt}.` };
-  });
-}
-def('WRKJOBSCDE', 'Work with Job Schedule Entries', [], async (ctx) => {
-  const list = await loadScde();
-  if (!ctx.interactive) return { text: list.map((e) => `${e.job} ${e.frq} ${e.scdtime} ${e.status}`).join('; ') || 'No entries.' };
-  const p = new Panel({ fn: 'CMD-WRKJOBSCDE', keys: ['F3', 'F5', 'F12'] });
-  p.title('Work with Job Schedule Entries');
-  p.sysName();
-  p.text(4, 2, 'Type options, press Enter.', 'b');
-  p.text(5, 4, '2=Change   3=Hold   4=Remove   5=Display details   6=Release', 'b');
-  p.text(7, 37, '-----Schedule------', 'w');
-  p.text(8, 2, 'Opt  Job         Status   Date     Time      Frequency    Recovery', 'w');
-  list.slice(0, 12).forEach((e, i) => p.text(9 + i, 7, padR(e.job, 11)).text(9 + i, 19, padR(e.status, 8)).text(9 + i, 28, padR(e.scddate === '*NONE' ? 'USER DEF' : e.scddate, 8)).text(9 + i, 37, `${e.scdtime.slice(0, 2)}:${e.scdtime.slice(2, 4)}:${e.scdtime.slice(4, 6)}`).text(9 + i, 47, padR(e.frq, 12)).text(9 + i, 60, '*SBMRLS'));
-  if (!list.length) p.text(9, 7, '(No job schedule entries)');
-  p.more(21, false);
-  p.fkeys('F3=Exit   F5=Refresh   F6=Add   F12=Cancel');
-  await ctx.display(p);
-  return null;
-}, { interactive: true });
-
 export async function register() {
   addServer(snmpDef);
   addServer(ntpDef);
   addServer(lpdDef);
-  // Entrada de planificación por omisión: cierre diario del banco a las 23:00 (retenida; RLSJOBSCDE para activarla)
-  const list = await loadScde();
-  if (!list.some((e) => e.job === 'CIERREBNK')) {
-    list.push({ job: 'CIERREBNK', cmd: 'CALL PGM(BANCO/BNKCIERRE)', frq: '*WEEKLY', scddate: '*NONE', scdday: ['*ALL'], scdtime: '230000', user: 'QSECOFR', text: 'Cierre diario del banco', status: 'HLD', created: new Date().toISOString() });
-    await saveScde(list);
-  }
-  startScheduler();
 }

@@ -34,7 +34,14 @@ export class Ctx {
     if (handled) return handled;
     const q = opts.raw ? text : await qualifySql(text, this.libl, this.curlib);
     await this.ensureCommit();
-    return gw.sql(q, params, { client: this.client, tx: this.job.cmt?.tx });
+    const r = await gw.sql(q, params, { client: this.client, tx: this.job.cmt?.tx });
+    // DROP TABLE/VIEW por SQL elimina también el objeto *FILE (la creación la recoge findObject)
+    const drop = !r.error && /^\s*DROP\s+(?:TABLE|VIEW)\s+"?(\w+)"?\s*\.\s*"?(\w+)"?/i.exec(q);
+    if (drop) {
+      const { forgetSqlObject } = await import('./objects.js');
+      await forgetSqlObject(drop[1].toUpperCase(), drop[2].toUpperCase());
+    }
+    return r;
   }
 
   // ---------- Control de compromiso (STRCMTCTL / COMMIT / ROLLBACK) ----------
