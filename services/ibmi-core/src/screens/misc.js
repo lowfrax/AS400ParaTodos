@@ -21,7 +21,7 @@ export async function dsplibl(ctx) {
     optLen: 1,
     colHead: 'Opt  Library     Type      Text',
     cmd: false,
-    load: async () => ctx.libl.map((l) => ({ name: l, type: ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'].includes(l) ? 'SYS' : l === ctx.job.curlib ? 'CUR' : 'USR' })),
+    load: async () => ctx.libl.map((l) => ({ name: l === `QT${ctx.job.number}` ? 'QTEMP' : l, type: ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'].includes(l) ? 'SYS' : l === ctx.job.curlib ? 'CUR' : 'USR' })),
     key: (l) => l.name,
     row: (l) => `${padR(l.name, 10)}  ${padR(l.type, 8)}  ${padR(text.get(l.name) || '', 50)}`,
     fkeys: ['F3=Exit   F12=Cancel   F17=Top   F18=Bottom'],

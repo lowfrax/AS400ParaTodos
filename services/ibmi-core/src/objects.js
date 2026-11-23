@@ -58,6 +58,9 @@ const DDL = [
      FROMUSR VARCHAR(10) NOT NULL DEFAULT '', FROMJOB VARCHAR(28) NOT NULL DEFAULT '', SENT TIMESTAMP,
      REPLY VARCHAR(132) NOT NULL DEFAULT '', STATUS VARCHAR(10) NOT NULL DEFAULT 'NEW')`,
   `CREATE TABLE QSYS.SYSVAL (NAME VARCHAR(10) NOT NULL PRIMARY KEY, SVALUE VARCHAR(256) NOT NULL DEFAULT '', TEXT VARCHAR(50) NOT NULL DEFAULT '')`,
+  // Autorizaciones privadas, *PUBLIC y lista de autorizaciones de cada objeto (GRTOBJAUT / RVKOBJAUT)
+  `CREATE TABLE QSYS.OBJAUT (LIB VARCHAR(10) NOT NULL, NAME VARCHAR(10) NOT NULL, TYPE VARCHAR(10) NOT NULL, USR VARCHAR(10) NOT NULL,
+     AUT VARCHAR(160) NOT NULL DEFAULT '', PRIMARY KEY (LIB, NAME, TYPE, USR))`,
 ];
 
 export const SYSVALS = [
@@ -77,6 +80,8 @@ export const SYSVALS = [
   ['QATNPGM', '*ASSIST', 'Attention program'],
   ['QINACTITV', '*NONE', 'Inactive job time-out'],
   ['QAUTOVRT', '0', 'Autoconfigure virtual devices'],
+  ['QCRTAUT', '*CHANGE', 'Create default public authority'],
+  ['QSECURITY', '40', 'System security level'],
 ];
 
 // Contadores de identificadores (spool / mensajes)
@@ -126,6 +131,13 @@ export async function initSchema() {
     const r = await gw.sql(`ALTER TABLE QSYS.USRPRF ADD COLUMN PWDTOKEN VARCHAR(256) NOT NULL DEFAULT ''`);
     if (r.error && r.sqlstate !== '42711') throw new Error(`QSYS.USRPRF: ${r.error}`);
   }
+  // Migración: autorizaciones especiales y perfil de grupo de los perfiles de usuario
+  for (const [c, ddl] of [['SPCAUT', "VARCHAR(160) NOT NULL DEFAULT '*USRCLS'"], ['GRPPRF', "VARCHAR(10) NOT NULL DEFAULT '*NONE'"]]) {
+    if (Array.isArray(cols) && !cols.some((x) => x.name === c)) {
+      const r2 = await gw.sql(`ALTER TABLE QSYS.USRPRF ADD COLUMN ${c} ${ddl}`);
+      if (r2.error && r2.sqlstate !== '42711') throw new Error(`QSYS.USRPRF: ${r2.error}`);
+    }
+  }
   for (const [name, value, text] of SYSVALS) {
     const ex = await gw.rows(`SELECT NAME FROM QSYS.SYSVAL WHERE NAME = ?`, [name]);
     if (!ex.length) await gw.exec(`INSERT INTO QSYS.SYSVAL (NAME, SVALUE, TEXT) VALUES (?, ?, ?)`, [name, value, text]);
@@ -145,7 +157,8 @@ async function ensureLibObject(lib, text, owner = 'QSYS') {
 
 // ---------- Bibliotecas ----------
 export async function libraries() {
-  return gw.rows(`SELECT NAME, ATTR, TEXT, OWNER, CREATED FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND TYPE = '*LIB' ORDER BY NAME`);
+  const rows = await gw.rows(`SELECT NAME, ATTR, TEXT, OWNER, CREATED FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND TYPE = '*LIB' ORDER BY NAME`);
+  return rows.filter((r) => !/^QT\d{6}$/.test(r.NAME));
 }
 export async function libExists(lib) {
   const r = await gw.rows(`SELECT NAME FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB'`, [lib]);
@@ -165,6 +178,8 @@ export async function deleteLibrary(lib) {
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ?`, [lib]);
+  await gw.sql(`DELETE FROM QSYS.OBJAUT WHERE LIB = ? OR (LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB')`, [lib, lib]);
+  (await import('./security.js')).invalidateAuth();
   // Entradas de las colas de datos de la biblioteca (QSYS.DTAQE existe desde el IPL)
   await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB'`, [lib]);
@@ -186,6 +201,8 @@ export async function listObjects(lib, name = '*ALL', type = '*ALL') {
 }
 
 export async function putObject(lib, name, type, attr, text, data, owner = 'QSECOFR') {
+  // El propietario de un objeto nuevo es el usuario que lo crea (perfil del trabajo actual)
+  if (owner === 'QSECOFR') { const { currentCtx } = await import('./security.js'); const c = currentCtx(); if (c && c.job && c.job.user) owner = c.job.user; }
   const json = data === undefined ? null : JSON.stringify(data);
   const ex = await gw.rows(`SELECT NAME FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
   if (ex.length) {
@@ -198,8 +215,12 @@ export async function putObject(lib, name, type, attr, text, data, owner = 'QSEC
 }
 
 export async function deleteObject(lib, name, type) {
-  const o = await gw.rows(`SELECT ATTR FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
+  const o = await gw.rows(`SELECT ATTR, OWNER FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
   if (!o.length) throw new CLError('CPF2105', name, lib, type);
+  // Borrar exige *OBJEXIST sobre el objeto
+  const sec = await import('./security.js');
+  await sec.checkAuthority(null, { LIB: lib, NAME: name, TYPE: type, OWNER: o[0].OWNER }, 'EXIST');
+  await sec.dropAuthorities(lib, name, type);
   if (type === '*FILE' && ['PF', 'PF-DTA'].includes(o[0].ATTR)) {
     // Como en IBM i, no se puede borrar un físico con lógicos que dependen de él
     const deps = await dependentLogicals(lib, name);
@@ -236,8 +257,8 @@ export async function syncSqlTables(lib) {
   const known = new Set(objs.map((o) => o.NAME));
   for (const t of tables) {
     if (!known.has(t.name) && t.name.length <= 10) {
-      await gw.exec(`INSERT INTO QSYS.OBJECTS (LIB, NAME, TYPE, ATTR, TEXT, OWNER, CREATED, CHANGED) VALUES (?, ?, '*FILE', ?, ?, 'QSECOFR', ?, ?)`,
-        [lib, t.name, t.type === 'VIEW' ? 'LF' : 'PF', t.text || '', now(), now()]).catch(() => {});
+      await gw.exec(`INSERT INTO QSYS.OBJECTS (LIB, NAME, TYPE, ATTR, TEXT, OWNER, CREATED, CHANGED) VALUES (?, ?, '*FILE', ?, ?, ?, ?, ?)`,
+        [lib, t.name, t.type === 'VIEW' ? 'LF' : 'PF', t.text || '', (await import('./security.js')).currentCtx()?.job?.user || 'QSECOFR', now(), now()]).catch(() => {});
     }
   }
 }
@@ -345,6 +366,9 @@ export async function updateUser(name, fields) {
 }
 export async function deleteUser(name) {
   await gw.exec(`DELETE FROM QSYS.USRPRF WHERE NAME = ?`, [name]);
+  // Sus autorizaciones privadas desaparecen con el perfil
+  await gw.sql(`DELETE FROM QSYS.OBJAUT WHERE USR = ?`, [name]);
+  (await import('./security.js')).invalidateAuth();
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*USRPRF'`, [name]);
 }
 

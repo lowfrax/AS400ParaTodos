@@ -87,10 +87,17 @@ export function createDb2Driver(cfg) {
     let result;
     // Las cadenas largas (IR de programas, spool) se enlazan como CLOB: VARCHAR admite como máximo 32672 bytes.
     const bound = (params || []).map((p) => (typeof p === 'string' && Buffer.byteLength(p) > 32000 ? { ParamType: 'INPUT', DataType: 'CLOB', Data: p } : p));
+    // Db2 LUW avisa con SQL0513W (01504) en un UPDATE/DELETE sin WHERE y ibm_db lo trata como error aunque la
+    // sentencia se ejecuta; en Db2 for i no hay aviso. Con WHERE 1 = 1 no hay aviso y se conserva la cuenta de filas.
+    const bare = String(sql).replace(/'(?:[^']|'')*'/g, "''");
+    if (/^\s*(UPDATE|DELETE)\b/i.test(bare) && !/\bWHERE\b/i.test(bare) && !/\bWITH\s+(NC|UR|CS|RS|RR)\s*$/i.test(bare)) sql = `${sql} WHERE 1 = 1`;
     try {
       [result] = await conn.queryResult(sql, bound.length ? bound : null);
     } catch (e) {
-      throw normalizeError(e);
+      const err = normalizeError(e);
+      // SQLSTATE de clase 01 = aviso: la sentencia se ha ejecutado
+      if (String(err.sqlstate).startsWith('01')) return { columns: [], rows: [], rowCount: -1, warning: { sqlstate: err.sqlstate, sqlcode: err.sqlcode, message: err.message } };
+      throw err;
     }
     if (!result) return { columns: [], rows: [], rowCount: 0 };
     try {

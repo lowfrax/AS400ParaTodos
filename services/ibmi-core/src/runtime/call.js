@@ -18,9 +18,10 @@ export async function loadProgram(ctx, name, lib) {
   if (!o) throw new CLError('CPF9811', name, lib || '*LIBL');
   const key = `${o.LIB}/${name}`;
   const c = programCache.get(key);
-  if (c && c.changed === String(o.CHANGED)) return { o, data: c.data, key };
+  if (c && c.changed === String(o.CHANGED)) { const { checkAuthority } = await import('../security.js'); await checkAuthority(ctx, o, 'EXECUTE'); return { o, data: c.data, key }; }
   const data = await objectData(gw, o.LIB, name, '*PGM');
   if (!data) throw new CLError('CPF9811', name, o.LIB);
+  { const { checkAuthority } = await import('../security.js'); await checkAuthority(ctx, o, 'EXECUTE'); }
   programCache.set(key, { changed: String(o.CHANGED), data });
   return { o, data, key };
 }
@@ -74,12 +75,34 @@ function makeHost(ctx, pgmName) {
     // OVRDBF FILE(n) TOFILE(lib/arch): el programa abre el archivo alterado
     describeFile: (n) => {
       const ov = overrideFor(job, 'DB', String(n).replace(/^.*\//, ''));
-      const target = ov && ov.tofile && ov.tofile !== '*FILE' ? ov.tofile : n;
-      return describeFile(gw, target, ctx.libl).then((d) => (ov ? { ...d, override: ov } : d)).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); });
+      let target = ov && ov.tofile && ov.tofile !== '*FILE' ? ov.tofile : n;
+      // EXTFILE('QTEMP/x') u OVRDBF TOFILE(QTEMP/x): la QTEMP del trabajo
+      if (/^(\*LIBL\/)?QTEMP\//i.test(String(target))) target = `${ctx.resolveLib('QTEMP')}/${String(target).replace(/^.*\//, '')}`;
+      return describeFile(gw, target, ctx.libl).then(async (d) => {
+        // Abrir el archivo exige *OBJOPR; leer, *READ (las grabaciones se comprueban en cada operación)
+        const { checkAuthority, objectRow } = await import('../security.js');
+        const row = await objectRow(d.lib || d.schema, d.table || String(target).replace(/^.*\//, '').toUpperCase(), '*FILE');
+        if (row) await checkAuthority(ctx, row, ['*OBJOPR']);
+        return ov ? { ...d, override: ov } : d;
+      }).catch((e) => {
+        if (['CPF9802', 'CPF9820'].includes(e.msgId)) throw new RpgError('01216', 'RNX1216', `Error message ${e.msgId} appeared during OPEN for file ${String(n).replace(/^.*\//, '')}: ${e.message}`);
+        throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`);
+      });
     },
     openDisk: (desc) => withPosition(desc, new DiskFile({
       name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys, keyDesc: desc.keyDesc, rrn: desc.rrn,
-      sql: async (t, p) => { await ctx.ensureCommit(); return gw.sql(t, p, { client, tx: job.cmt?.tx }); },
+      sql: async (t, p) => {
+        const verb = (/^\s*(SELECT|INSERT|UPDATE|DELETE)/i.exec(t) || [])[1];
+        const need = { SELECT: 'READ', INSERT: 'ADD', UPDATE: 'UPD', DELETE: 'DLT' }[String(verb).toUpperCase()];
+        desc.$auth = desc.$auth || {};
+        if (need && !desc.$auth[need]) {
+          const { checkAuthority, objectRow } = await import('../security.js');
+          const row = await objectRow(desc.schema, desc.table, '*FILE');
+          if (row) { try { await checkAuthority(ctx, row, need, { library: false }); } catch (e) { throw new RpgError('01218', 'RNX1218', e.message); } }
+          desc.$auth[need] = true;
+        }
+        await ctx.ensureCommit(); return gw.sql(t, p, { client, tx: job.cmt?.tx });
+      },
     })),
     // SET OPTION COMMIT / COMMIT / ROLLBACK (SQL) y COMMIT / ROLBK (RPG)
     async sqlControl(verb, o = {}) {

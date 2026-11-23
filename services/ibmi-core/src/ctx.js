@@ -2,6 +2,7 @@
 import { gw, SYSTEM_LIBS } from './objects.js';
 import { CLError } from './messages.js';
 import { jobEndHooks } from './system.js';
+import { qtempName, ensureQtemp, physicalSql } from './qtemp.js';
 
 export class Ctx {
   constructor({ session = null, job, user, interactive = !!session }) {
@@ -14,12 +15,14 @@ export class Ctx {
   get libl() {
     const out = [...SYSTEM_LIBS];
     if (this.job.curlib && !out.includes(this.job.curlib)) out.push(this.job.curlib);
-    for (const l of this.job.libl) if (!out.includes(l)) out.push(l);
+    // QTEMP es la biblioteca temporal propia del trabajo (esquema QTnnnnnn)
+    for (const l0 of this.job.libl) { const l = l0 === 'QTEMP' ? qtempName(this.job) : l0; if (!out.includes(l)) out.push(l); }
     return out;
   }
   get curlib() { return this.job.curlib || 'QGPL'; }
   resolveLib(lib) {
     if (!lib || lib === '*CURLIB') return this.curlib;
+    if (String(lib).toUpperCase() === 'QTEMP') return qtempName(this.job);
     return lib;
   }
   async display(panel) {
@@ -32,7 +35,10 @@ export class Ctx {
     const { sqlServices } = await import('./sql/services.js');
     const handled = await sqlServices(this, String(text), params, opts);
     if (handled) return handled;
+    if (/QTEMP/i.test(String(text))) { await ensureQtemp(this.job); text = physicalSql(this.job, text); }
     const q = opts.raw ? text : await qualifySql(text, this.libl, this.curlib);
+    const denied = await this.sqlAuthority(q);
+    if (denied) return denied;
     await this.ensureCommit();
     const r = await gw.sql(q, params, { client: this.client, tx: this.job.cmt?.tx });
     // DROP TABLE/VIEW por SQL elimina también el objeto *FILE (la creación la recoge findObject)
@@ -41,7 +47,24 @@ export class Ctx {
       const { forgetSqlObject } = await import('./objects.js');
       await forgetSqlObject(drop[1].toUpperCase(), drop[2].toUpperCase());
     }
+    if (r.error && this.job.qtemp) r.error = String(r.error).split(qtempName(this.job)).join('QTEMP');
     return r;
+  }
+
+  /** Autorización de objeto sobre las tablas de una sentencia (SQL0551 / SQLSTATE 42501). */
+  async sqlAuthority(q) {
+    const sec = await import('./security.js');
+    if (!this.user || sec.hasSpecial(this.user, '*ALLOBJ')) return null;
+    for (const t of sec.sqlTargets(q)) {
+      if (SYSTEM_LIBS.includes(t.lib)) continue;
+      const row = await sec.objectRow(t.lib, t.name, '*FILE');
+      if (!row) continue;
+      try { await sec.checkAuthority(this, row, t.need); } catch (e) {
+        const lib = String(t.lib).split(`QT${this.job.number}`).join('QTEMP');
+        return { error: `SQL0551N  Not authorized to object ${t.name} in ${lib} type *FILE.  SQLSTATE=42501`, sqlstate: '42501', sqlcode: -551, columns: [], rows: [] };
+      }
+    }
+    return null;
   }
 
   // ---------- Control de compromiso (STRCMTCTL / COMMIT / ROLLBACK) ----------

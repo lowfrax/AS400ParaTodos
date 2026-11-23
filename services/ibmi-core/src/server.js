@@ -19,6 +19,7 @@ import './commands/ile.js';
 import './commands/msgf.js';
 import './commands/ovr.js';
 import './commands/sda.js';
+import './commands/security.js';
 import { startScheduler } from './commands/util.js';
 import { initIfs, homeDir } from './ifs.js';
 import { initDtaq } from './dtaq.js';
@@ -172,6 +173,7 @@ async function seedDemo() {
   ], ['42710', '23505']);
   await gw.sql(`COMMENT ON TABLE DEMOLIB.ITEMS IS 'Articulos (creada con SQL)'`);
   await obj.syncSqlTables('DEMOLIB');
+  { const { cleanupQtemps } = await import('./qtemp.js'); const n = await cleanupQtemps(); if (n) console.log(`[ipl] ${n} QTEMP de trabajos anteriores eliminadas`); }
   SYS.iplDetail = '';
   endJob(job);
 }

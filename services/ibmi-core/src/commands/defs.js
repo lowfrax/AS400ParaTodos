@@ -26,6 +26,8 @@ const textVal = (t) => (!t || t === '*BLANK' ? '' : t);
 const I = { interactive: true };
 
 async function requireLib(ctx, lib) {
+  // QTEMP siempre existe para el trabajo (su esquema se crea al usarse)
+  if (String(lib).toUpperCase() === 'QTEMP') { await (await import('../qtemp.js')).ensureQtemp(ctx.job); return ctx.resolveLib('QTEMP'); }
   const l = ctx.resolveLib(lib);
   if (!(await obj.libExists(l))) throw new CLError('CPF2110', l);
   return l;
@@ -88,7 +90,7 @@ def('DSPLIBL', 'Display Library List', [P('OUTPUT', 'Output', 'char', 6, { dft: 
   const text = new Map((await obj.libraries()).map((l) => [l.NAME, l.TEXT]));
   const sys = ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'];
   const lines = ['                                     Library List', '', '  Library     Type      Text Description',
-    ...ctx.libl.map((l) => `  ${l.padEnd(10)}  ${(sys.includes(l) ? 'SYS' : l === ctx.job.curlib ? 'CUR' : 'USR').padEnd(8)}  ${text.get(l) || ''}`.replace(/\s+$/, '')),
+    ...ctx.libl.map((l) => (l === `QT${ctx.job.number}` ? 'QTEMP' : l)).map((l) => `  ${l.padEnd(10)}  ${(sys.includes(l) ? 'SYS' : l === ctx.job.curlib ? 'CUR' : 'USR').padEnd(8)}  ${text.get(l) || ''}`.replace(/\s+$/, '')),
     '', '                         * * * * *  E N D  O F  L I S T I N G  * * * * *'];
   await obj.createSpool(ctx.job, 'QPRTLIBL', lines, { usrdta: 'DSPLIBL' });
   return { text: lines.join('\n') };
@@ -172,11 +174,16 @@ def('DLTF', 'Delete File', [LIBQ('FILE', 'File')], async (ctx, a) => {
   invalidateTables(lib);
   return msg('CPC2191', a.FILE.obj, lib, '*FILE');
 });
-def('CHKOBJ', 'Check Object', [LIBQ('OBJ', 'Object'), P('OBJTYPE', 'Object type', 'name', 10, { req: true })], async (ctx, a) => {
+def('CHKOBJ', 'Check Object', [LIBQ('OBJ', 'Object'), P('OBJTYPE', 'Object type', 'name', 10, { req: true }), P('MBR', 'Member, if data base file', 'name', 10, { dft: '*NONE' }), P('AUT', 'Authority', 'list', 60, { dft: '*NONE' })], async (ctx, a) => {
   const o = await obj.findObject(gw, a.OBJ.obj, a.OBJTYPE, a.OBJ.lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(a.OBJ.lib), ctx.libl);
   if (!o) {
     if (a.OBJTYPE === '*LIB' && await obj.libExists(a.OBJ.obj)) return null;
     throw new CLError('CPF9801', a.OBJ.obj, a.OBJ.lib);
+  }
+  const aut = [].concat(a.AUT || '*NONE').map((x) => String(x).toUpperCase()).filter((x) => x !== '*NONE');
+  if (aut.length) {
+    const sec = await import('../security.js');
+    if (!(await sec.hasAuthority(ctx.user, o, [...sec.expand(aut)]))) throw new CLError('CPF9802', o.NAME, o.LIB);
   }
   return null;
 });
@@ -411,6 +418,7 @@ def('CRTDTAARA', 'Create Data Area', [
 def('DSPDTAARA', 'Display Data Area', [LIBQ('DTAARA', 'Data area')], async (ctx, a) => {
   const o = await obj.findObject(gw, a.DTAARA.obj, '*DTAARA', a.DTAARA.lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(a.DTAARA.lib), ctx.libl);
   if (!o) throw new CLError('CPF9801', a.DTAARA.obj, a.DTAARA.lib);
+  await (await import('../security.js')).checkAuthority(ctx, o, 'READ');
   const d = await obj.objectData(gw, o.LIB, o.NAME, '*DTAARA');
   if (!ctx.interactive) return { text: `${o.NAME}: ${d.value}` };
   const p = new Panel({ fn: 'CMD-DSPDTAARA', keys: ['F3', 'F12'] });
@@ -429,6 +437,7 @@ def('DSPDTAARA', 'Display Data Area', [LIBQ('DTAARA', 'Data area')], async (ctx,
 def('CHGDTAARA', 'Change Data Area', [LIBQ('DTAARA', 'Data area'), P('VALUE', 'New value', 'text', 60, { req: true })], async (ctx, a) => {
   const o = await obj.findObject(gw, a.DTAARA.obj, '*DTAARA', a.DTAARA.lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(a.DTAARA.lib), ctx.libl);
   if (!o) throw new CLError('CPF9801', a.DTAARA.obj, a.DTAARA.lib);
+  await (await import('../security.js')).checkAuthority(ctx, o, ['*OBJOPR', '*UPD']);
   const d = (await obj.objectData(gw, o.LIB, o.NAME, '*DTAARA')) || {};
   d.value = a.VALUE;
   await obj.putObject(o.LIB, o.NAME, '*DTAARA', d.type || '*CHAR', o.TEXT, d, o.OWNER);
@@ -444,10 +453,14 @@ def('CRTUSRPRF', 'Create User Profile', [
   P('CURLIB', 'Current library', 'name', 10, { dft: '*CRTDFT' }),
   P('INLMNU', 'Initial menu', 'name', 10, { dft: 'MAIN' }),
   P('INLPGM', 'Initial program to call', 'name', 10, { dft: '*NONE' }),
+  P('SPCAUT', 'Special authority', 'list', 80, { dft: '*USRCLS', choices: '*USRCLS, *NONE, *ALLOBJ, *SECADM, *SAVSYS, *JOBCTL, *SPLCTL, *SERVICE, *AUDIT, *IOSYSCFG' }),
+  P('GRPPRF', 'Group profile', 'name', 10, { dft: '*NONE' }),
   TEXT,
 ], async (ctx, a) => {
   if (!isSecofr(ctx)) throw new CLError('CPF9898', 'Not authorized to command CRTUSRPRF. User class *SECOFR required.');
+  if (a.GRPPRF && a.GRPPRF !== '*NONE' && !(await obj.getUser(a.GRPPRF))) throw new CLError('CPF2204', a.GRPPRF);
   await obj.createUser({ name: a.USRPRF, password: a.PASSWORD === '*USRPRF' ? a.USRPRF : a.PASSWORD, usrcls: a.USRCLS, text: textVal(a.TEXT), curlib: a.CURLIB, inlmnu: a.INLMNU, inlpgm: a.INLPGM });
+  await obj.updateUser(a.USRPRF, { SPCAUT: [].concat(a.SPCAUT || '*USRCLS').join(' '), GRPPRF: a.GRPPRF || '*NONE' });
   return msg('CPC2205', a.USRPRF);
 });
 def('CHGUSRPRF', 'Change User Profile', [
@@ -457,6 +470,8 @@ def('CHGUSRPRF', 'Change User Profile', [
   P('CURLIB', 'Current library', 'name', 10, { dft: '*SAME' }),
   P('INLMNU', 'Initial menu', 'name', 10, { dft: '*SAME' }),
   P('INLPGM', 'Initial program to call', 'name', 10, { dft: '*SAME' }),
+  P('SPCAUT', 'Special authority', 'list', 80, { dft: '*SAME' }),
+  P('GRPPRF', 'Group profile', 'name', 10, { dft: '*SAME' }),
   P('TEXT', "Text 'description'", 'text', 50, { dft: '*SAME' }),
 ], async (ctx, a) => {
   if (!isSecofr(ctx) && a.USRPRF !== ctx.job.user) throw new CLError('CPF9898', 'Not authorized to change user profile.');
@@ -465,6 +480,8 @@ def('CHGUSRPRF', 'Change User Profile', [
   if (a.PASSWORD !== '*SAME') { f.PWDHASH = obj.hashPassword(a.USRPRF, a.PASSWORD); f.PWDTOKEN = obj.passwordTokens(a.USRPRF, a.PASSWORD); }
   if (a.STATUS !== '*SAME') { f.STATUS = a.STATUS; if (a.STATUS === '*ENABLED') f.INVALID = 0; }
   for (const k of ['CURLIB', 'INLMNU', 'INLPGM', 'TEXT']) if (a[k] !== '*SAME') f[k] = a[k];
+  if ([].concat(a.SPCAUT)[0] !== '*SAME') { if (!isSecofr(ctx)) throw new CLError('CPF2217', a.USRPRF); f.SPCAUT = [].concat(a.SPCAUT).join(' '); }
+  if (a.GRPPRF !== '*SAME') { if (!isSecofr(ctx)) throw new CLError('CPF2217', a.USRPRF); if (a.GRPPRF !== '*NONE' && !(await obj.getUser(a.GRPPRF))) throw new CLError('CPF2204', a.GRPPRF); f.GRPPRF = a.GRPPRF; }
   await obj.updateUser(a.USRPRF, f);
   return { id: 'CPC2204', text: `User profile ${a.USRPRF} changed.` };
 });
@@ -502,7 +519,8 @@ def('WRKUSRPRF', 'Work with User Profiles', [P('USRPRF', 'User profile', 'name',
 def('DSPUSRPRF', 'Display User Profile', [P('USRPRF', 'User profile', 'name', 10, { req: true })], async (ctx, a) => {
   const u = await obj.getUser(a.USRPRF);
   if (!u) throw new CLError('CPF2204', a.USRPRF);
-  return { text: `${u.NAME}: class ${u.USRCLS}, status ${u.STATUS}, curlib ${u.CURLIB}, menu ${u.INLMNU}, last sign-on ${u.LASTSIGN || 'never'}.` };
+  const { specialAuthorities } = await import('../security.js');
+  return { text: `${u.NAME}: class ${u.USRCLS}, status ${u.STATUS}, curlib ${u.CURLIB}, menu ${u.INLMNU}, special authority ${specialAuthorities(u).join(' ') || '*NONE'}, group profile ${u.GRPPRF || '*NONE'}, last sign-on ${u.LASTSIGN || 'never'}.` };
 });
 def('WRKSYSVAL', 'Work with System Values', [P('SYSVAL', 'System value', 'name', 10, { dft: '*ALL' })], async (ctx) => { await wrksysval(ctx); }, I);
 def('DSPSYSVAL', 'Display System Value', [P('SYSVAL', 'System value', 'name', 10, { req: true })], async (ctx, a) => {

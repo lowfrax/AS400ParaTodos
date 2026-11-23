@@ -79,6 +79,9 @@ await step('sql', 'QSYS2.HTTP_GET (HTTP saliente desde SQL)', async () => {
 });
 await step('sql', 'Control de compromiso: ROLLBACK deshace y COMMIT confirma', async () => {
   const sql = (s) => api('POST', '/api/v1/qsh', { script: s });
+  // El trabajo de servidor se reutiliza: se termina cualquier control de compromiso que quedara activo
+  await api('POST', '/api/v1/commands', { command: 'ROLLBACK' });
+  await api('POST', '/api/v1/commands', { command: 'ENDCMTCTL' });
   await api('POST', '/api/v1/sql', { sql: 'CREATE TABLE CONNTEST.TXT (ID INTEGER NOT NULL PRIMARY KEY, TXT VARCHAR(20))' });
   // Mapepire/host servers prueban transacciones de sesión; por REST se usa un programa CL con STRCMTCTL
   const r = await api('POST', '/api/v1/commands', { command: 'STRCMTCTL LCKLVL(*CHG)' });
@@ -86,7 +89,7 @@ await step('sql', 'Control de compromiso: ROLLBACK deshace y COMMIT confirma', a
   await api('POST', '/api/v1/sql', { sql: "INSERT INTO CONNTEST.TXT VALUES (1, 'uno')" });
   await api('POST', '/api/v1/commands', { command: 'ROLLBACK' });
   let c = await api('POST', '/api/v1/sql', { sql: 'SELECT COUNT(*) AS N FROM CONNTEST.TXT' });
-  assert(Number(c.json.data[0].N) === 0, `tras ROLLBACK: ${c.text}`);
+  assert(c.json.data && Number(c.json.data[0].N) === 0, `tras ROLLBACK: ${c.text}`);
   await api('POST', '/api/v1/sql', { sql: "INSERT INTO CONNTEST.TXT VALUES (2, 'dos')" });
   await api('POST', '/api/v1/commands', { command: 'COMMIT' });
   await api('POST', '/api/v1/commands', { command: 'ENDCMTCTL' });

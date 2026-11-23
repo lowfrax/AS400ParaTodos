@@ -51,6 +51,9 @@ export function dftValue(p) {
 }
 
 /** Convierte un mandato analizado a {args, given} validando palabras clave. */
+// Mandatos que manejan la lista de bibliotecas por nombre: QTEMP se guarda tal cual
+const LIBL_CMDS = new Set(['ADDLIBLE', 'RMVLIBLE', 'CHGLIBL', 'EDTLIBL', 'CHGCURLIB', 'DSPLIBL', 'CHGSYSLIBL']);
+
 export function bindArgs(cmd, parsed) {
   const given = {};
   const posParams = cmd.params.filter((p) => p.pos !== false);
@@ -198,8 +201,25 @@ export async function runCommand(ctx, text, opts = {}) {
   if (ctx.job && opts.log !== false) logJob(ctx.job, '', '*RQS', full);
   if (ctx.job && !String(ctx.job.function).startsWith('PGM-')) ctx.job.function = `CMD-${cmd.name}`;
   if (opts.onRebuild) opts.onRebuild(full);
-  const out = (await cmd.run(ctx, fin.args, { text: full, parsed, given })) || [];
-  const list = Array.isArray(out) ? out : [out];
+  const { qtempName, ensureQtemp, logicalText } = await import('../qtemp.js');
+  if (ctx.job && !LIBL_CMDS.has(cmd.name)) {
+    let uses = false;
+    for (const p of cmd.params) {
+      const v = fin.args[p.kw];
+      if (p.type === 'qual' && v && typeof v === 'object' && String(v.lib).toUpperCase() === 'QTEMP') { v.lib = qtempName(ctx.job); uses = true; }
+      else if (p.type === 'name' && /LIB$/.test(p.kw) && String(v).toUpperCase() === 'QTEMP') { fin.args[p.kw] = qtempName(ctx.job); uses = true; }
+    }
+    if (uses) await ensureQtemp(ctx.job);
+  }
+  let out;
+  try {
+    const { withCtx } = await import('../security.js');
+    out = (await withCtx(ctx, () => cmd.run(ctx, fin.args, { text: full, parsed, given }))) || [];
+  } catch (e) {
+    if (ctx.job && e && typeof e.message === 'string') e.message = logicalText(ctx.job, e.message);
+    throw e;
+  }
+  const list = (Array.isArray(out) ? out : [out]).map((m) => (m && m.text && ctx.job ? { ...m, text: logicalText(ctx.job, m.text) } : m));
   if (ctx.job) for (const m of list) if (m && m.text) logJob(ctx.job, m.id || '', '*COMP', m.text, { sev: m.sev || 0 });
   return list.filter(Boolean);
 }
