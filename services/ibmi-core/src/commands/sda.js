@@ -20,6 +20,16 @@ def('STRSDA', 'Start SDA', [
   return null;
 }, I);
 
+def('STRRLU', 'Start Report Layout Utility', [
+  P('SRCFILE', 'Source file', 'qual', 10, { dft: 'QDDSSRC' }),
+  P('SRCMBR', 'Source member', 'name', 10, { req: true }),
+  P('OPTION', 'Option', 'name', 2, { dft: '*BLANK' }),
+  P('PAGEWIDTH', 'Page width', 'int', 3, { dft: '132' }),
+], async (ctx, a) => {
+  const { strrlu } = await import('../screens/rlu.js');
+  return (await strrlu(ctx, { lib: a.SRCFILE.lib, file: a.SRCFILE.obj, mbr: a.SRCMBR })) || null;
+}, I);
+
 const qualOf = (ctx, q, dftName, dftLib) => {
   if (!q || !q.obj || q.obj === '*MENU') return { lib: dftLib, name: dftName };
   return { lib: !q.lib || q.lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(q.lib), name: up(q.obj) };

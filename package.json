@@ -20,7 +20,8 @@
     "test:sda": "node tests/sda-e2e.mjs",
     "test:sys": "node tests/sys-e2e.mjs",
     "test:dbg": "node tests/dbg-e2e.mjs",
-    "test:qry": "node tests/qry-e2e.mjs"
+    "test:qry": "node tests/qry-e2e.mjs",
+    "test:rlu": "node tests/rlu-e2e.mjs"
   },
   "engines": {
     "node": ">=22.5"

@@ -201,6 +201,13 @@ export async function wrkmbrpdm(ctx, libIn, file, mbr = '*ALL', type = '*ALL') {
             break;
           }
           case '13': last = await changeText(ctx, lib, file, m); break;
+          // 19=Cambiar con RLU (archivos de impresora)
+          case '19': {
+            if (m.TYPE !== 'PRTF') { last = { text: 'Option 19 is valid only for members of type PRTF.', sev: 30 }; break; }
+            const { strrlu } = await import('./rlu.js');
+            last = await strrlu(ctx, { lib, file, mbr: m.MBR });
+            break;
+          }
           // 17=Cambiar con SDA (pantallas y menús)
           case '17': {
             const { strsda } = await import('./sda.js');

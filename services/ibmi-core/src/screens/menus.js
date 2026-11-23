@@ -89,6 +89,8 @@ export const MENUS = {
       [4, 'Display physical file member', '?DSPPFM'],
       [5, 'Display file field description', '?DSPFFD'],
       [6, 'Screen design aid (SDA)', 'STRSDA'],
+      [7, 'Report layout utility (RLU)', '?STRRLU'],
+      [8, 'Query utilities', 'STRQRY'],
     ],
     bottomOptions: [[90, 'Sign off', 'SIGNOFF']],
   },
