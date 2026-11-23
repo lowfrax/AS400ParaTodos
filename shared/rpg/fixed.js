@@ -682,7 +682,13 @@ export function convertFixed(lines, { dialect = 'RPG4' } = {}) {
       }
       case 'IN': case 'OUT': stmts.push(`${op}$ ${c.f2};`); break;
       case 'UNLOCK': case 'FEOD': case 'DUMP': case 'FORCE': case 'NEXT': case 'POST': case 'ACQ': case 'REL': case 'SHTDN': case 'DEALLOC': stmts.push(op === 'SHTDN' && c.hi ? `*IN${c.hi} = *OFF;` : `// ${op}`); break;
-      case 'OCCUR': stmts.push(c.f1 ? `%OCCUR(${f2}) = ${f1};` : `${res} = %OCCUR(${f2});`); break;
+      case 'OCCUR': {
+        // factor 1: fija la aparición; resultado: recibe la aparición actual; indicador ER (73-74) si está fuera de rango
+        const body = [...(c.f1 ? [`%OCCUR(${f2}) = ${f1};`] : []), ...(c.res ? [`${res} = %OCCUR(${f2});`] : [])];
+        if (c.lo) stmts.push(`*IN${c.lo} = *OFF;`, 'MONITOR;', ...body, 'ON-ERROR;', `*IN${c.lo} = *ON;`, 'ENDMON;');
+        else stmts.push(...body);
+        break;
+      }
       case 'TESTN': setInd(stmts, c.hi, `$TESTN$(${res}) = 1`); setInd(stmts, c.lo, `$TESTN$(${res}) = 2`); setInd(stmts, c.eq, `${res} = *BLANKS`); break;
       case 'TESTZ': setInd(stmts, c.hi, '*OFF'); setInd(stmts, c.lo, '*OFF'); setInd(stmts, c.eq, '*ON'); break;
       case 'TEST': stmts.push('MONITOR;', `$TEST$ '${ext}' : ${c.f1 || "''"} : ${res};`, ...(c.lo ? [`*IN${c.lo} = *OFF;`] : []), 'ON-ERROR;', ...(c.lo ? [`*IN${c.lo} = *ON;`] : []), 'ENDMON;'); break;

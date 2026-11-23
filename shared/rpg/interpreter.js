@@ -275,14 +275,16 @@ export class RpgProgram {
    * consecutivos) son vistas sobre ese buffer, de modo que se solapan como en un AS400 real.
    * Sin INZ la DS empieza en blancos (X'40'): leer un numérico sin inicializar da error de datos decimales.
    */
-  makeInst(tmpl, { buf, base = 0, inzAll = false } = {}) {
+  makeInst(tmpl, { buf, base: base0 = 0, inzAll = false, occ = null } = {}) {
     const total = layoutDeep(tmpl);
-    if (!buf) buf = Buffer.alloc(total, 0x40);
+    if (!buf) buf = Buffer.alloc(total * (occ ? occ.n : 1), 0x40);
+    // DS de múltiples apariciones (OCCURS): un buffer de n × longitud; los subcampos ven la aparición actual
+    const B = occ ? () => base0 + occ.cur * total : () => base0;
     const fields = new Map();
     for (const f of tmpl) {
       if (f.nested) {
         const sub = { kind: 'ds', name: f.name, qualified: true, tmpl: f.nested, dim: f.dim };
-        const at = (i) => this.makeInst(f.nested, { buf, base: base + f.$off + i * f.$stride, inzAll });
+        const at = (i) => this.makeInst(f.nested, { buf, base: base0 + f.$off + i * f.$stride, inzAll, occ: occ && { get cur() { return occ.cur; }, n: occ.n, len: total } });
         sub.inst = f.dim ? Array.from({ length: f.dim }, (_, i) => at(i)) : at(0);
         fields.set(f.name, sub);
         continue;
@@ -293,9 +295,9 @@ export class RpgProgram {
         fields.set(f.name, { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: v0, value: f.dim ? Array.from({ length: f.dim }, () => v0) : v0 });
         continue;
       }
-      const fv = { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: init, ds: { buf, off: base + f.$off, stride: f.$stride } };
+      const fv = { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: init, ds: { buf, get off() { return B() + f.$off; }, stride: f.$stride } };
       const t = f.type;
-      const offOf = (i) => base + f.$off + i * f.$stride;
+      const offOf = (i) => B() + f.$off + i * f.$stride;
       if (f.dim) {
         const n = f.dim;
         Object.defineProperty(fv, 'value', {
@@ -317,7 +319,7 @@ export class RpgProgram {
       else if (inzAll) fv.value = f.dim ? Array.from({ length: f.dim }, () => blank(t)) : blank(t);
       fields.set(f.name, fv);
     }
-    return { fields, buf, base, len: total };
+    return { fields, buf, get base() { return B(); }, len: total, occ };
   }
 
   async declare(d, scope) {
@@ -346,7 +348,14 @@ export class RpgProgram {
       const dim = d.dim ? this.constNumber(d.dim) : 0;
       const v = { kind: 'ds', name: d.name, qualified: !!d.qualified || !!dim, tmpl, dim, template: d.template };
       const inzAll = !!d.inz;
-      v.inst = dim ? Array.from({ length: dim }, () => this.makeInst(tmpl, { inzAll })) : this.makeInst(tmpl, { inzAll });
+      const occurs = d.occurs ? this.constNumber(d.occurs) : 0;
+      if (occurs > 1 && !dim) {
+        // OCCURS(n): la inicialización (INZ) se hace en la 1.ª aparición y se copia a las demás
+        v.occ = { cur: 0, n: occurs };
+        v.inst = this.makeInst(tmpl, { inzAll, occ: v.occ });
+        const len = v.inst.len;
+        for (let i = 1; i < occurs; i++) v.inst.buf.copy(v.inst.buf, i * len, 0, len);
+      } else v.inst = dim ? Array.from({ length: dim }, () => this.makeInst(tmpl, { inzAll })) : this.makeInst(tmpl, { inzAll });
       if (d.name !== '*N') scope.vars.set(d.name, v);
       if (!v.qualified) for (const [n, f] of v.inst.fields) scope.vars.set(n, f);
     }
@@ -642,6 +651,11 @@ export class RpgProgram {
       }
       return null;
     }
+    // %OCCUR(ds1) = ds2 (OCCUR con otra DS en el factor 1): toma la aparición actual de ds2
+    if (s.target.k === 'bif' && s.target.name === '%OCCUR' && s.mode === '=' && s.expr.k === 'id') {
+      const src = sc.lookup(s.expr.name);
+      if (src && src.kind === 'ds' && src.occ) { const v = this.occDs(s.target.args[0], sc); v.occ.cur = this.occIndex(v, 0, sc, src); return null; }
+    }
     const ref = await this.place(s.target, sc);
     let v = await this.ev(s.expr, sc);
     if (s.mode !== '=') v = arith(s.mode.slice(0, -1), ref.get(), v);
@@ -772,6 +786,20 @@ export class RpgProgram {
     }
   }
 
+  /** DS de múltiples apariciones nombrada en %OCCUR / OCCUR. */
+  occDs(e, sc) {
+    const v = e && e.k === 'id' ? sc.lookup(e.name) : null;
+    if (!v || v.kind !== 'ds' || !v.occ) throw new RpgError('00202', 'RNF7030', `${e && e.name ? e.name : 'Operand'} is not a multiple-occurrence data structure.`);
+    return v;
+  }
+
+  /** Aparición pedida (1..n): un número, o la aparición actual de otra DS de múltiples apariciones. */
+  occIndex(v, val, sc, src) {
+    const n = src && src.occ ? src.occ.cur + 1 : Math.trunc(toNumber(val));
+    if (n < 1 || n > v.occ.n) throw new RpgError('00122', 'RNX0122', `Occurrence value ${n} is outside the range of multiple-occurrence data structure ${v.name} (1-${v.occ.n}).`);
+    return n - 1;
+  }
+
   async place(e, sc) {
     switch (e.k) {
       case 'id': {
@@ -831,6 +859,16 @@ export class RpgProgram {
         return this.place({ k: 'sp', v: '*IN' + String(n).padStart(2, '0') }, sc);
       }
       case 'bif': {
+        if (e.name === '%OCCUR') {
+          const v = this.occDs(e.args[0], sc);
+          const self = this;
+          return {
+            type: { t: 'int', bits: 32 },
+            get: () => v.occ.cur + 1,
+            set: (val) => { v.occ.cur = self.occIndex(v, val, sc); },
+            clear: () => { v.occ.cur = 0; },
+          };
+        }
         if (e.name === '%SUBST') {
           const base = await this.place(e.args[0], sc);
           const start = Math.trunc(toNumber(await this.ev(e.args[1], sc)));
@@ -1215,12 +1253,13 @@ export class RpgProgram {
         if (t && (t.t === 'packed' || t.t === 'zoned')) return t.digits;
         return toStr(v).length;
       }
+      case '%OCCUR': return this.occDs(a[0], sc).occ.cur + 1;
       case '%SIZE': {
         // %SIZE no lee el dato: sólo su tipo (un numérico sin inicializar no da error)
         const all = a[1] && a[1].k === 'sp' && a[1].v === '*ALL';
         if (['id', 'dot', 'idx', 'call'].includes(a[0].k) && (a[0].k !== 'call' || sc.lookup(a[0].name))) {
           const p = await this.place(a[0], sc);
-          if (p.dsvar) return this.dsLen(p.dsvar.tmpl) * (all && p.dsvar.dim ? p.dsvar.dim : 1);
+          if (p.dsvar) return this.dsLen(p.dsvar.tmpl) * (all && p.dsvar.dim ? p.dsvar.dim : all && p.dsvar.occ ? p.dsvar.occ.n : 1);
           if (p.type) {
             const sz = p.type.t === 'varchar' ? p.type.len + 2 : byteLen(p.type) || charLen(p.type);
             return sz * (all && p.var && p.var.dim ? p.var.dim : 1);
@@ -1230,6 +1269,7 @@ export class RpgProgram {
         return toStr(v).length;
       }
       case '%ELEM': {
+        if (a[0].k === 'id') { const ov = sc.lookup(a[0].name); if (ov && ov.kind === 'ds' && ov.occ) return ov.occ.n; }
         const p = await this.place(a[0], sc);
         if (p.var && p.var.dim) return p.var.dim;
         if (p.insts) return p.insts.length;
@@ -1621,6 +1661,42 @@ export class RpgProgram {
     }
   }
 
+  /** Número de filas de FOR n ROWS / n ROWS: literal o variable del lenguaje principal. */
+  async rowCount(spec, sc) {
+    const t = String(spec).replace(/\s+/g, '');
+    if (t.startsWith(':')) return Math.trunc(toNumber((await this.hostValues([t.slice(1).toUpperCase()], sc))[0]));
+    return Math.trunc(Number(t));
+  }
+
+  /** Instancias (una por fila) de una DS de múltiples apariciones o de un array de DS. */
+  rowInsts(name, sc) {
+    const v = sc.lookup(String(name).toUpperCase());
+    if (!v || v.kind !== 'ds') return null;
+    if (Array.isArray(v.inst)) return v.inst;
+    if (!v.occ) return null;
+    // una vista fija por aparición sobre el mismo buffer (no cambia la aparición actual)
+    return Array.from({ length: v.occ.n }, (_, i) => this.makeInst(v.tmpl, { buf: v.inst.buf, base: i * v.inst.len }));
+  }
+
+  /** FETCH … FOR n ROWS INTO :ds — SQLERRD(3) = filas leídas; SQLERRD(5) = 100 si se ha leído la última fila. */
+  async fetchRows(cur, nSpec, target, sc) {
+    const name = String(target).trim().replace(/^:\s*/, '');
+    const insts = this.rowInsts(name, sc);
+    if (!insts) { this.setSqlca(-312, '42618', 'Host variable ' + name + ' is not a multiple-occurrence data structure or data structure array.'); return; }
+    const n = Math.min(await this.rowCount(nSpec, sc), insts.length);
+    if (cur.pos < 0) cur.pos = 0;
+    const rows = cur.rows.slice(cur.pos, cur.pos + n);
+    cur.pos += rows.length;
+    const errd = this.globals.vars.get('SQLERRD').value;
+    if (!rows.length) { this.setSqlca(100, '02000', 'Row not found for FETCH.'); errd[4] = 100; return; }
+    rows.forEach((row, i) => {
+      const fields = [...insts[i].fields.values()].filter((f) => f.kind === 's');
+      fields.forEach((f, j) => { if (j < row.length) f.value = coerce(f.type, row[j] ?? blank(f.type)); });
+    });
+    this.setSqlca(0, '00000', '', rows.length);
+    errd[4] = cur.pos >= cur.rows.length ? 100 : 0;
+  }
+
   setSqlca(code, state, msg = '', rows = 0) {
     const g = this.globals.vars;
     g.get('SQLCODE').value = code; g.get('SQLCOD').value = code;
@@ -1705,7 +1781,8 @@ export class RpgProgram {
       this.setSqlca(0, '00000');
       return;
     }
-    if ((m = /^FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|BEFORE|AFTER|CURRENT|RELATIVE\s+-?\d+|ABSOLUTE\s+\d+)\s+)?(?:FROM\s+)?([\w#@$]+)\s+(?:FOR\s+\S+\s+ROWS\s+)?INTO\s+([\s\S]+)$/i.exec(T))) {
+    if ((m = /^FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|BEFORE|AFTER|CURRENT|RELATIVE\s+-?\d+|ABSOLUTE\s+\d+)\s+)?(?:FROM\s+)?([\w#@$]+)\s+(?:FOR\s+(\S+)\s+ROWS\s+)?INTO\s+([\s\S]+)$/i.exec(T))) {
+      m = [m[0], m[1], m[2], m[4], m[3]];
       const cur = this.cursors.get(m[2].toUpperCase());
       if (!cur || !cur.rows) { this.setSqlca(-501, '24501', `Cursor ${m[2]} not open.`); return; }
       const dir = (m[1] || 'NEXT').toUpperCase();
@@ -1715,12 +1792,26 @@ export class RpgProgram {
       else if (dir.startsWith('RELATIVE')) cur.pos += Number(dir.split(/\s+/)[1]) - 1;
       else if (dir.startsWith('ABSOLUTE')) cur.pos = Number(dir.split(/\s+/)[1]) - 1;
       else if (dir === 'CURRENT') cur.pos -= 1;
+      if (m[4]) return this.fetchRows(cur, m[4], m[3], sc);
       const row = cur.rows[cur.pos];
       cur.pos++;
       if (!row || cur.pos < 1) { this.setSqlca(100, '02000', 'Row not found for FETCH.'); if (cur.pos < 0) cur.pos = 0; return; }
       const targets = this.hostVars(m[3]).vars;
       await this.assignRow(targets, row, sc);
       this.setSqlca(0, '00000', '', 1);
+      return;
+    }
+    // INSERT INTO t n ROWS VALUES(:ds): inserción de varias filas desde una DS de múltiples apariciones o un array de DS
+    if ((m = /^INSERT\s+INTO\s+([\s\S]+?)\s+(:\s*[\w#@$]+|\d+)\s+ROWS\s+VALUES\s*\(\s*:\s*([\w#@$]+)\s*\)\s*$/i.exec(T))) {
+      const n = await this.rowCount(m[2], sc);
+      const insts = this.rowInsts(m[3], sc);
+      if (!insts) { this.setSqlca(-312, '42618', `Host variable ${m[3]} is not a multiple-occurrence data structure or data structure array.`); return; }
+      const k = Math.min(n, insts.length);
+      if (k <= 0) { this.setSqlca(0, '00000', '', 0); return; }
+      const rowsVals = insts.slice(0, k).map((inst) => [...inst.fields.values()].filter((f) => f.kind === 's').map((f) => (f.type && f.type.t === 'char' ? toStr(f.value).replace(/\s+$/, '') : f.value)));
+      const marks = '(' + rowsVals[0].map(() => '?').join(', ') + ')';
+      const r = await this.runQuery('INSERT INTO ' + m[1] + ' VALUES ' + rowsVals.map(() => marks).join(', '), rowsVals.flat());
+      if (r) this.setSqlca(0, '00000', '', k);
       return;
     }
     // SELECT … INTO :a, :b FROM …  /  VALUES expr INTO :x  /  SET :x = expr

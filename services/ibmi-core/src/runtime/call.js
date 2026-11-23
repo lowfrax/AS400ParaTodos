@@ -158,6 +158,8 @@ function makeHost(ctx, pgmName) {
 
 async function runRpg(ctx, o, name, key, ir, refs) {
   const job = ctx.job;
+  // CRTSQLRPGI COMMIT(*CHG|*CS|…): el programa trabaja bajo control de compromiso, como con SET OPTION COMMIT
+  if (ir.$commit && !job.cmt) { await ctx.startCommit(ir.$commit === '*UR' ? '*CHG' : ir.$commit === '*RS' ? '*ALL' : ir.$commit); job.cmt.auto = true; }
   let entry = job.activations.get(key);
   let prog;
   if (entry) prog = entry;

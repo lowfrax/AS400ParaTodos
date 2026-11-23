@@ -233,7 +233,7 @@ const compileDef = (name, title, type, kw = 'PGM', srcDft = 'QRPGLESRC', extra =
   ...extra,
 ], async (ctx, a) => compileObject(ctx, {
   type: type || null, obj: a[kw], srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE === '*YES',
-  module: name === 'CRTRPGMOD' || (name === 'CRTSQLRPGI' && a.OBJTYPE === '*MODULE'), bnddir: a.BNDDIR, bndsrvpgm: a.BNDSRVPGM,
+  module: name === 'CRTRPGMOD' || (name === 'CRTSQLRPGI' && a.OBJTYPE === '*MODULE'), bnddir: a.BNDDIR, bndsrvpgm: a.BNDSRVPGM, commit: a.COMMIT,
 }));
 const BND = [
   P('DFTACTGRP', 'Default activation group', 'char', 4, { dft: '*YES', choices: '*YES, *NO' }),
@@ -243,7 +243,10 @@ const BND = [
 compileDef('CRTBNDRPG', 'Create Bound RPG Program', 'RPGLE', 'PGM', 'QRPGLESRC', BND);
 compileDef('CRTRPGMOD', 'Create RPG Module', 'RPGLE', 'MODULE', 'QRPGLESRC');
 compileDef('CRTRPGPGM', 'Create RPG Program', 'RPG', 'PGM', 'QRPGSRC');
-compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ', 'QRPGLESRC', [P('OBJTYPE', 'Compile type', 'name', 10, { dft: '*PGM', choices: '*PGM, *MODULE, *SRVPGM' }), ...BND]);
+// COMMIT: en IBM i el valor por omisión es *CHG, que sobre tablas sin diario da SQL7008; aquí las tablas no se registran
+// por diario, así que el valor por omisión es *NONE y *CHG/*CS/*ALL/*RR activan el control de compromiso como SET OPTION.
+compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ', 'QRPGLESRC', [P('OBJTYPE', 'Compile type', 'name', 10, { dft: '*PGM', choices: '*PGM, *MODULE, *SRVPGM' }),
+  P('COMMIT', 'Commitment control', 'name', 6, { dft: '*NONE', choices: '*CHG, *UR, *CS, *ALL, *RS, *RR, *NONE, *NC' }), ...BND]);
 compileDef('CRTBNDCL', 'Create Bound CL Program', 'CLLE', 'PGM', 'QCLLESRC');
 
 // CVTRPGSRC: RPG III / RPG/400 / RPG II → ILE RPG (RPG IV) en columnas fijas

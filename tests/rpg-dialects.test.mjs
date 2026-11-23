@@ -397,3 +397,155 @@ test('DS en columnas fijas: RPG IV con posiciones en bytes (P/B) y RPG III con I
   const r3 = await runSrc(src3);
   assert.deepEqual(r3.msgs.map((m) => m.trim()), ['2026', '01', '32']);
 });
+
+test('DS de múltiples apariciones: OCCURS, %OCCUR, %SIZE(*ALL), %ELEM, INZ y fuera de rango', async () => {
+  const src = `**FREE
+dcl-ds ventas occurs(12) inz;
+  mes zoned(2:0);
+  importe packed(9:2);
+  nombre char(10);
+end-ds;
+dcl-ds copia likeds(ventas);
+dcl-ds otra occurs(12);
+  x char(1);
+end-ds;
+dcl-s i int(10);
+dcl-s total packed(11:2);
+dsply %char(importe);
+for i = 1 to 12;
+  %occur(ventas) = i;
+  mes = i;
+  importe = i * 100.5;
+endfor;
+%occur(ventas) = 3;
+dsply %char(mes) + ' ' + %char(importe);
+dsply %char(%occur(ventas));
+for i = 1 to %elem(ventas);
+  %occur(ventas) = i;
+  total += importe;
+endfor;
+dsply %char(total);
+dsply %char(%size(ventas)) + ' ' + %char(%size(ventas: *all));
+%occur(ventas) = 5;
+nombre = 'QUINTO';
+copia = ventas;
+dsply copia.nombre;
+%occur(ventas) = 6;
+dsply '[' + nombre + ']';
+%occur(otra) = 5;
+%occur(ventas) = otra;
+dsply nombre;
+monitor;
+  %occur(ventas) = 13;
+on-error 122;
+  dsply 'rango';
+endmon;
+dsply %char(%occur(ventas));
+*inlr = *on;`;
+  const { msgs } = await runSrc(src.split('\n'));
+  assert.deepEqual(msgs.map((m) => m.trimEnd()), ['.00', '3 301.50', '3', '7839.00', '17 204', 'QUINTO', '[          ]', 'QUINTO', 'rango', '5']);
+});
+
+test('OCCUR en columnas fijas: RPG IV (D OCCURS) y RPG III (I-spec DS con apariciones) con indicador de error', async () => {
+  const src4 = [
+    L('D', { 7: 'TABLA', 24: 'DS', 44: 'OCCURS(3)' }),
+    L('D', { 7: 'COD', 33: '      3' }),
+    L('D', { 7: 'N', 33: '      5', 40: 'S', 41: ' 0' }),
+    L('D', { 7: 'P', 24: 'S', 33: '      3', 40: 'S', 41: ' 0' }),
+    L('C', { 12: '2', 26: 'OCCUR', 36: 'TABLA' }),
+    L('C', { 26: 'EVAL', 36: "COD = 'DOS'" }),
+    L('C', { 12: '1', 26: 'OCCUR', 36: 'TABLA' }),
+    L('C', { 26: 'EVAL', 36: "COD = 'UNO'" }),
+    L('C', { 12: '2', 26: 'OCCUR', 36: 'TABLA', 50: 'P' }),
+    L('C', { 12: 'COD', 26: 'DSPLY' }),
+    L('C', { 12: 'P', 26: 'DSPLY' }),
+    L('C', { 12: '4', 26: 'OCCUR', 36: 'TABLA', 73: '90' }),
+    L('C', { 12: "'ERR'", 26: 'DSPLY', 9: '90' }),
+    L('C', { 26: 'OCCUR', 36: 'TABLA', 50: 'P' }),
+    L('C', { 12: 'P', 26: 'DSPLY' }),
+    L('C', { 26: 'EVAL', 36: '*INLR = *ON' }),
+  ];
+  const r4 = await runSrc(src4, { dialect: 'RPG4' });
+  assert.deepEqual(r4.msgs.map((m) => m.trim()), ['DOS', '2', 'ERR', '2']);
+  const src3 = [
+    L('I', { 7: 'MESES', 19: 'DS', 44: '  12' }),
+    L('I', { 44: '   1', 48: '   3', 53: 'ABREV' }),
+    L('I', { 44: '   4', 48: '   5', 52: '0', 53: 'DIAS' }),
+    L('C', { 28: 'Z-ADD', 33: '0', 43: 'I', 49: '  2', 52: '0' }),
+    L('C', { 18: 'I', 28: 'DOULT', 33: '12' }),
+    L('C', { 28: 'ADD', 33: '1', 43: 'I' }),
+    L('C', { 18: 'I', 28: 'OCUR', 33: 'MESES' }),
+    L('C', { 28: 'Z-ADD', 33: '30', 43: 'DIAS' }),
+    L('C', { 28: 'END' }),
+    L('C', { 18: '2', 28: 'OCUR', 33: 'MESES' }),
+    L('C', { 28: 'MOVEL', 33: "'FEB'", 43: 'ABREV' }),
+    L('C', { 28: 'Z-ADD', 33: '28', 43: 'DIAS' }),
+    L('C', { 18: '1', 28: 'OCUR', 33: 'MESES' }),
+    L('C', { 18: 'DIAS', 28: 'DSPLY' }),
+    L('C', { 18: '2', 28: 'OCUR', 33: 'MESES', 43: 'J', 49: '  2', 52: '0' }),
+    L('C', { 18: 'ABREV', 28: 'DSPLY' }),
+    L('C', { 18: 'DIAS', 28: 'DSPLY' }),
+    L('C', { 18: 'J', 28: 'DSPLY' }),
+    L('C', { 18: '13', 28: 'OCUR', 33: 'MESES', 56: '91' }),
+    L('C', { 9: '91', 18: "'FUERA'", 28: 'DSPLY' }),
+    L('C', { 28: 'SETON', 54: 'LR' }),
+  ];
+  const r3 = await runSrc(src3);
+  assert.deepEqual(r3.msgs.map((m) => m.trim()), ['30', 'FEB', '28', '2', 'FUERA']);
+});
+
+test('SQL incrustado de varias filas: FETCH … FOR n ROWS y INSERT … n ROWS con DS de múltiples apariciones y arrays de DS', async () => {
+  const data = [[1, 'ANA'], [2, 'LUIS'], [3, 'EVA'], [4, 'PEPE'], [5, 'SARA']];
+  const inserted = [];
+  const host = {
+    async sql(text, params) {
+      if (/^SELECT/i.test(text)) return { columns: [{ name: 'ID' }, { name: 'NOMBRE' }], rows: data, rowCount: data.length };
+      if (/^INSERT/i.test(text)) { inserted.push({ text, params }); return { columns: [], rows: [], rowCount: params.length / 2 }; }
+      return { columns: [], rows: [], rowCount: 0 };
+    },
+  };
+  const src = `**FREE
+dcl-ds cli occurs(2) qualified;
+  id int(10);
+  nombre char(10);
+end-ds;
+dcl-ds arr qualified dim(10);
+  id int(10);
+  nombre char(10);
+end-ds;
+dcl-s n int(10) inz(2);
+dcl-s s varchar(80);
+exec sql declare c1 cursor for select id, nombre from clientes order by id;
+exec sql open c1;
+dow 1 = 1;
+  exec sql fetch next from c1 for :n rows into :cli;
+  if sqlcode = 100;
+    leave;
+  endif;
+  s = %char(sqlerrd(3)) + ':';
+  %occur(cli) = 1;
+  s += %trim(cli.nombre);
+  if sqlerrd(3) > 1;
+    %occur(cli) = 2;
+    s += ',' + %trim(cli.nombre);
+  endif;
+  dsply (s + ' ' + %char(sqlerrd(5)));
+enddo;
+exec sql close c1;
+exec sql open c1;
+exec sql fetch c1 for 10 rows into :arr;
+dsply (%char(sqlerrd(3)) + ' ' + %trim(arr(5).nombre));
+arr(1).id = 7; arr(1).nombre = 'NUEVO';
+arr(2).id = 8; arr(2).nombre = 'OTRO';
+exec sql insert into clientes 2 rows values(:arr);
+dsply %char(sqlerrd(3));
+*inlr = *on;`;
+  const ir = compileRpg(src.split('\n'));
+  const msgs = [];
+  const p = new RpgProgram(ir, { dsply: async (t) => { msgs.push(t); return ''; }, ...host });
+  await p.call([]);
+  assert.deepEqual(msgs, ['2:ANA,LUIS 0', '2:EVA,PEPE 0', '1:SARA 100', '5 SARA', '2']);
+  assert.equal(inserted.length, 1);
+  assert.match(inserted[0].text, /INSERT INTO clientes VALUES \(\?, \?\), \(\?, \?\)/i);
+  assert.deepEqual(inserted[0].params, [7, 'NUEVO', 8, 'OTRO']);
+});

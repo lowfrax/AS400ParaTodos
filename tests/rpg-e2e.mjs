@@ -206,6 +206,59 @@ async function lastSpool(name) {
   check('PRTF: EDTCDE(J), indicador 50 y PAGNBR', sp5.some((l) => /INITECH\s+1,000\.00\s+\*ALTO\*/.test(l)) && /LISTADO POR LOGICO.*PAG\s+1/.test(sp5[0] || ''));
   check('PRTF: total con SPACEB', sp5.some((l) => /^ TOTAL\s+1,215\.00/.test(l)));
 
+  // SQL incrustado de varias filas sobre Db2 real: FETCH FOR n ROWS en una DS de múltiples apariciones e INSERT n ROWS
+  const MULTI = `**FREE
+ctl-opt dftactgrp(*no);
+dcl-f QSYSPRT printer(132);
+dcl-ds fila occurs(3) qualified;
+  region char(4);
+  cliente char(10);
+  importe packed(9:2);
+end-ds;
+dcl-ds nuevos qualified dim(2);
+  region char(4);
+  cliente char(10);
+  importe packed(9:2);
+end-ds;
+dcl-s linea char(132);
+dcl-s i int(10);
+dcl-s leidas int(10);
+exec sql set option commit = *none;
+exec sql declare c cursor for select region, client, import from ventas order by client;
+exec sql open c;
+dou sqlcode <> 0 or sqlerrd(5) = 100;
+  exec sql fetch c for 3 rows into :fila;
+  if sqlcode <> 0;
+    leave;
+  endif;
+  for i = 1 to sqlerrd(3);
+    %occur(fila) = i;
+    linea = 'FILA ' + fila.cliente + ' ' + %char(fila.importe);
+    write QSYSPRT linea;
+    leidas += 1;
+  endfor;
+enddo;
+exec sql close c;
+nuevos(1).region = 'ESTE'; nuevos(1).cliente = 'UMBRELLA'; nuevos(1).importe = 77.70;
+nuevos(2).region = 'ESTE'; nuevos(2).cliente = 'WAYNE'; nuevos(2).importe = 88.80;
+exec sql insert into ventas 2 rows values(:nuevos);
+linea = 'LEIDAS ' + %char(leidas) + ' INSERTADAS ' + %char(sqlerrd(3)) + ' SQLCODE ' + %char(sqlcode);
+write QSYSPRT linea;
+*inlr = *on;`;
+  await api('PUT', `/sources/${LIB}/QRPGLESRC/MULTI?type=SQLRPGLE`, { lines: MULTI.split('\n') });
+  const cm = await cmd(`CRTSQLRPGI OBJ(${LIB}/MULTI) SRCFILE(${LIB}/QRPGLESRC) COMMIT(*NONE)`, false);
+  check('CRTSQLRPGI con FETCH/INSERT de varias filas', cm.status === 200, JSON.stringify(cm.messages || cm).slice(0, 500));
+  const nVentas = await api('POST', '/sql', { sql: `SELECT COUNT(*) AS N FROM ${LIB}.VENTAS` });
+  const before = Number(nVentas.data && nVentas.data[0] && nVentas.data[0].N);
+  const cmc = await cmd(`CALL PGM(${LIB}/MULTI)`, false);
+  check('CALL MULTI', cmc.status === 200, JSON.stringify(cmc).slice(0, 300));
+  const spm = (await lastSpool('QSYSPRT')) || [];
+  const filas = spm.filter((l) => /^FILA /.test(l.trim()));
+  check('FETCH FOR 3 ROWS lee todas las filas en bloques', filas.length === before && before > 3, `${filas.length} de ${before}: ${spm.join(' | ')}`);
+  check('INSERT 2 ROWS: SQLERRD(3) = 2', spm.some((l) => new RegExp(`LEIDAS ${before} INSERTADAS 2 SQLCODE 0`).test(l)), spm.join(' | '));
+  const ins = await api('POST', '/sql', { sql: `SELECT CLIENT, IMPORT FROM ${LIB}.VENTAS WHERE REGION = 'ESTE' ORDER BY CLIENT` });
+  check('las filas insertadas están en Db2', JSON.stringify((ins.data || []).map((r) => ({ ...r, CLIENT: r.CLIENT.trim() }))) === JSON.stringify([{ CLIENT: 'UMBRELLA', IMPORT: 77.7 }, { CLIENT: 'WAYNE', IMPORT: 88.8 }]), JSON.stringify(ins.data || ins));
+
   if (!failed) { await cmd(`RMVLIBLE LIB(${LIB})`, false); await cmd(`DLTLIB LIB(${LIB})`, false); }
   console.log(failed ? `\n${failed} FALLOS` : '\nTodo correcto');
   process.exit(failed ? 1 : 0);
