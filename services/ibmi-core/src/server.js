@@ -18,6 +18,7 @@ import './commands/integration.js';
 import './commands/ile.js';
 import './commands/msgf.js';
 import './commands/ovr.js';
+import './commands/sda.js';
 import { startScheduler } from './commands/util.js';
 import { initIfs, homeDir } from './ifs.js';
 import { initDtaq } from './dtaq.js';

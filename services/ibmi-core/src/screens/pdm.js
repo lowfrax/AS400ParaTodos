@@ -172,7 +172,7 @@ export async function wrkmbrpdm(ctx, libIn, file, mbr = '*ALL', type = '*ALL') {
       p.label(4, 44, 'Position to', 22); p.input('POS', 4, 67, 10, {});
       return 6;
     },
-    opts: ['2=Edit         3=Copy  4=Delete 5=Display       6=Print     7=Rename', '8=Display description  9=Save  13=Change text  14=Compile  15=Create module...'],
+    opts: ['2=Edit         3=Copy  4=Delete 5=Display       6=Print     7=Rename', '8=Display description  9=Save  13=Change text  14=Compile  17=Change using SDA...'],
     colHead: 'Opt  Member      Type        Text',
     load: async () => (await listMembers(lib, file)).filter((m) => (mbr === '*ALL' || m.MBR === mbr || (mbr.endsWith('*') && m.MBR.startsWith(mbr.slice(0, -1)))) && (type === '*ALL' || m.TYPE === type)),
     key: (m) => m.MBR,
@@ -201,6 +201,13 @@ export async function wrkmbrpdm(ctx, libIn, file, mbr = '*ALL', type = '*ALL') {
             break;
           }
           case '13': last = await changeText(ctx, lib, file, m); break;
+          // 17=Cambiar con SDA (pantallas y menús)
+          case '17': {
+            const { strsda } = await import('./sda.js');
+            if (!['DSPF', 'MNUDDS'].includes(m.TYPE)) { last = { text: `Option 17 is valid only for members of type DSPF or MNUDDS.`, sev: 30 }; break; }
+            last = await strsda(ctx, { option: m.TYPE === 'MNUDDS' ? '2' : '1', srcfile: { lib, obj: file }, srcmbr: m.MBR, direct: true });
+            break;
+          }
           case '14': {
             const cmd = COMPILE_CMD[m.TYPE];
             if (!cmd) { last = { text: `Member type ${m.TYPE} cannot be compiled.`, sev: 30 }; break; }

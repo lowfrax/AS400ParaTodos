@@ -299,7 +299,8 @@ export function resolveRef(refs, fileRef, kws, name, line) {
   const rf = kws.find((k) => k.kw === 'REFFLD');
   const fieldName = rf ? rf.args[0].toUpperCase().replace(/^.*\//, '') : name;
   const file = rf && rf.args[1] ? rf.args[1].toUpperCase().replace(/^\*LIBL\//, '') : fileRef;
-  const desc = file && refs ? refs[file] : null;
+  // REF(BIB/ARCHIVO) o REFFLD(campo BIB/ARCHIVO): las descripciones se indexan por el nombre del archivo
+  const desc = file && refs ? refs[file] || refs[file.replace(/^.*\//, '')] : null;
   const fld = desc && desc.fields.find((f) => f.name === fieldName);
   if (!fld) throw new CompileError('CPD7434', `Referenced field ${fieldName} not found${file ? ` in file ${file}` : ''}.`, line);
   return refAttrs(fld);

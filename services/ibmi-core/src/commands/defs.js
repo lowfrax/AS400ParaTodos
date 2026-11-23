@@ -43,9 +43,15 @@ def('SIGNOFF', 'Sign Off', [P('LOG', 'Job log', 'char', 7, { dft: '*NOLIST', cho
   if (a.LOG === '*LIST') await obj.createSpool(ctx.job, 'QPJOBLOG', ctx.job.joblog.map((e) => `${(e.id || '').padEnd(8)} ${e.type.padEnd(8)} ${e.text}`), { usrdta: ctx.job.name, outq: 'QEZJOBLOG' });
   throw new SignOff();
 }, I);
-def('GO', 'Go to Menu', [P('MENU', 'Menu', 'name', 10, { req: true, choices: 'Name, *ALL' })], async (ctx, a) => {
-  const r = await goMenu(ctx, a.MENU);
-  return null && r;
+// GO: menús del sistema (en QSYS) o menús de usuario (*MENU creados con SDA / CRTMNU) en la lista de bibliotecas
+def('GO', 'Go to Menu', [P('MENU', 'Menu', 'qual', 10, { req: true, choices: 'Name, *ALL' })], async (ctx, a) => {
+  const q = typeof a.MENU === 'string' ? { lib: '*LIBL', obj: a.MENU } : a.MENU;
+  const name = String(q.obj).toUpperCase();
+  const { MENUS } = await import('../screens/menus.js');
+  if (MENUS[name] && (!q.lib || q.lib === '*LIBL' || q.lib === 'QSYS')) { await goMenu(ctx, name); return null; }
+  const { goUserMenu } = await import('./sda.js');
+  if (await goUserMenu(ctx, q)) return null;
+  throw new CLError('CPF6AC7', `Menu ${name} in library ${q.lib || '*LIBL'} not found.`);
 }, I);
 def('WRKACTJOB', 'Work with Active Jobs', [P('SBS', 'Subsystem', 'name', 10, { dft: '*ALL' })], async (ctx, a) => { await wrkactjob(ctx, a.SBS); }, I);
 def('WRKSYSSTS', 'Work with System Status', [], async (ctx) => { await wrksyssts(ctx); }, I);
