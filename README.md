@@ -99,7 +99,7 @@ Las contraseñas no distinguen mayúsculas (QPWDLVL 0). Tras 3 intentos fallidos
 
 `SIGNOFF GO WRKACTJOB WRKSYSSTS WRKSBS WRKSPLF WRKOUTQ DSPMSG SNDMSG DSPJOBLOG DSPJOB WRKJOB DSPLIBL CHGCURLIB ADDLIBLE RMVLIBLE CHGLIBL CRTLIB DLTLIB CLRLIB DSPLIB WRKLIB WRKOBJ DSPOBJD DLTOBJ DLTPGM DLTF CHKOBJ CRTSRCPF ADDPFM RMVM STRSEU STRPDM WRKLIBPDM WRKOBJPDM WRKMBRPDM CRTBNDRPG CRTRPGPGM CRTSQLRPGI CRTBNDCL CRTCLPGM CRTPF CRTDSPF CALL SBMJOB DLYJOB ENDJOB STRSQL RUNSQL DSPPFM DSPFFD CLRPFM CPYF CRTDTAARA DSPDTAARA CHGDTAARA CRTUSRPRF CHGUSRPRF CHGPRF CHGPWD DLTUSRPRF WRKUSRPRF DSPUSRPRF WRKSYSVAL DSPSYSVAL CHGSYSVAL SNDPGMMSG PWRDWNSYS` y `CALL QCMD` (*Command Entry*). En programas CL además: `PGM DCL CHGVAR IF/ELSE DO DOWHILE DOUNTIL DOFOR SELECT/WHEN GOTO LEAVE ITERATE RETURN MONMSG (EXEC(DO)) RTVJOBA RTVSYSVAL RTVDTAARA`.
 
-Además: `STRSDA CRTMNU CHGMNU DLTMNU OVRDBF OVRPRTF DLTOVR DSPOVR CPYSPLF DLTSPLF HLDSPLF RLSSPLF CHGSPLFA RUNSQLSTM CRTDUPOBJ RNMOBJ MOVOBJ CHGOBJD CPYSRCF RNMM ADDJOBSCDE CHGJOBSCDE RMVJOBSCDE HLDJOBSCDE RLSJOBSCDE WRKJOBSCDE CRTLF CRTPRTF CRTRPGMOD CRTSRVPGM CRTPGM UPDPGM UPDSRVPGM CRTBNDDIR ADDBNDDIRE CRTMSGF ADDMSGD CHGMSGD RMVMSGD DSPMSGD WRKMSGF RTVMSG RCVMSG SNDUSRMSG CVTRPGSRC` (y `STRQSH`/`QSH`, FTP, SSH, REXEC).
+Además: `STRSDA CRTMNU CHGMNU DLTMNU OVRDBF OVRPRTF DLTOVR DSPOVR CPYSPLF DLTSPLF HLDSPLF RLSSPLF CHGSPLFA RUNSQLSTM CRTDUPOBJ RNMOBJ MOVOBJ CHGOBJD CPYSRCF RNMM GRTOBJAUT RVKOBJAUT EDTOBJAUT DSPOBJAUT CHGOBJOWN WRKOBJOWN CHGLIB CRTAUTL DLTAUTL ADDAUTLE CHGAUTLE RMVAUTLE DSPAUTL EDTAUTL DSPAUTLOBJ CRTJRNRCV DLTJRNRCV DSPJRNRCVA CRTJRN DLTJRN CHGJRN WRKJRNA STRJRNPF ENDJRNPF DSPJRN APYJRNCHG RMVJRNCHG SNDJRNE CRTSAVF CLRSAVF DSPSAVF SAVOBJ SAVLIB SAVCHGOBJ SAVSECDTA RSTOBJ RSTLIB RSTUSRPRF RSTAUT CRTCMD CHGCMD DLTCMD DSPCMD STRDBG ENDDBG DSPMODSRC ADDPGM RMVPGM ADDBKP RMVBKP DSPDBG STRQRY WRKQRY RUNQRY DLTQRY STRRLU ADDJOBSCDE CHGJOBSCDE RMVJOBSCDE HLDJOBSCDE RLSJOBSCDE WRKJOBSCDE CRTLF CRTPRTF CRTRPGMOD CRTSRVPGM CRTPGM UPDPGM UPDSRVPGM CRTBNDDIR ADDBNDDIRE CRTMSGF ADDMSGD CHGMSGD RMVMSGD DSPMSGD WRKMSGF RTVMSG RCVMSG SNDUSRMSG CVTRPGSRC` (y `STRQSH`/`QSH`, FTP, SSH, REXEC).
 
 ### RPG IV soportado
 
@@ -145,6 +145,10 @@ npm run test:util        # OVRDBF/OVRPRTF, spool, RUNSQLSTM, objetos y planifica
 npm run test:ssh         # OpenSSH/SFTP con el cliente ssh del sistema
 npm run test:sda         # SDA por el terminal 5250: pantallas, prueba de pantallas, menús y GO
 npm run test:connections # TN5250, FTP, servidores host (jt400), REST/IWS, Mapepire, DRDA…
+npm run test:sys         # QTEMP por trabajo, seguridad de objetos, diarios, salvar/restaurar, CRTCMD
+npm run test:dbg         # depurador STRDBG por el terminal 5250
+npm run test:qry         # Query/400 (WRKQRY, RUNQRY)
+npm run test:rlu         # RLU (STRRLU) y uso del archivo de impresora desde RPG
 ```
 
 La prueba e2e y la de archivos por clave necesitan el sistema en marcha (`npm start`); sin él, la de archivos por clave se omite. La prueba e2e inicia sesión, ejecuta los programas de ejemplo, edita un miembro en SEU con órdenes de línea, compila, provoca un error RNQ0102, envía un trabajo por lotes y comprueba el MW/DSPMSG.
@@ -166,17 +170,21 @@ tests/                  Pruebas unitarias y e2e
 docker-compose.yml      Db2 + los tres servicios
 ```
 
-## Limitaciones conocidas
+## Diferencias con un IBM i real
 
-Implementado y comprobado contra Db2 real: TN5250 (ACS, tn5250j), FTP/FTPS, servidores host de jt400/ODBC, DRDA,
-REST/IWS, Mapepire, SSH/SFTP, SMTP; RPG II/III/IV/libre con el ciclo, ILE (módulos, programas de servicio,
-directorios de enlace), archivos lógicos, de impresora y de pantalla, DS sobre bytes EBCDIC y de múltiples
-apariciones, SQL incrustado, control de compromiso, colas de datos, archivos de mensajes, alteraciones,
-planificador, PDM, SEU y SDA. Lo que todavía no tiene un equivalente:
+Implementado y comprobado contra Db2 real: TN5250 (ACS, tn5250j), FTP/FTPS (también SAVF en binario), servidores
+host de jt400/ODBC, DRDA, REST/IWS, Mapepire, SSH/SFTP, SMTP; RPG II/III/IV/libre con el ciclo, ILE, archivos
+lógicos, de impresora y de pantalla, DS sobre bytes EBCDIC y de múltiples apariciones, SQL incrustado, control de
+compromiso con diarios (SQL7008 sin diario), colas de datos, archivos de mensajes, alteraciones, planificador,
+QTEMP por trabajo, seguridad de objetos (QSECURITY 40), salvar/restaurar en SAVF, mandatos de usuario, depurador,
+Query/400, PDM, SEU, SDA y RLU. Diferencias que quedan, por la naturaleza del emulador:
 
-- Seguridad a nivel de objeto (`GRTOBJAUT`, `RVKOBJAUT`, `EDTOBJAUT`, listas de autorizaciones): los perfiles y las contraseñas sí se comprueban.
-- Diarios (`CRTJRN`, `CRTJRNRCV`, `STRJRNPF`, `DSPJRN`): el control de compromiso usa transacciones de Db2, así que `CRTSQLRPGI` usa `COMMIT(*NONE)` por omisión en lugar de `*CHG` (en un IBM i, `*CHG` sobre tablas sin diario da SQL7008).
-- Salvar y restaurar (`SAVLIB`, `RSTLIB`, `SAVOBJ`, `CRTSAVF`), depuración (`STRDBG`), mandatos de usuario (`CRTCMD`), Query/400 (`WRKQRY`) y RLU.
-- QTEMP es una biblioteca compartida, no una por trabajo.
+- No hay unidades de cinta ni óptico: salvar y restaurar usan archivos de salvar (`DEV(*SAVF)`); `SAVSYS` y las
+  cintas no existen. Un SAVF contiene una sola biblioteca.
+- `CRTSQLRPGI` usa `COMMIT(*NONE)` por omisión (en IBM i es `*CHG`) para que los programas de ejemplo funcionen
+  sobre tablas sin diario; con `COMMIT(*CHG)` el comportamiento es el de IBM i (SQL7008 si la tabla no está en un diario).
+- El IFS no tiene autorizaciones por objeto (`CHGAUT`/`WRKAUT`); la seguridad de objetos se aplica a `/QSYS.LIB`.
+- El depurador muestra el fuente del miembro aunque el programa se compile con `DBGVIEW(*STMT)` (solo `*NONE` impide depurar)
+  y depura trabajos interactivos (no `STRSRVJOB`).
+- Las bibliotecas cuyo nombre empieza por `SYS` no se pueden crear (Db2 reserva esos esquemas).
 - Las pantallas reproducen el aspecto y la navegación de IBM i 7.x a partir de documentación pública; algunos textos de ayuda (F1) son genéricos.
- 
