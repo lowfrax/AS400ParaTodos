@@ -74,12 +74,28 @@ export function createDb2Driver(cfg) {
     return err;
   }
 
-  async function exec(sql, params = []) {
-    return withRetry(() => execOnce(sql, params));
+  async function exec(sql, params = [], client = '') {
+    return withRetry(() => execOnce(sql, params, client));
   }
 
-  async function execOnce(sql, params = []) {
-    return withConn((conn) => runOn(conn, sql, params));
+  async function execOnce(sql, params = [], client = '') {
+    return withConn(async (conn) => { await setClient(conn, sql, client, ''); return runOn(conn, sql, params); });
+  }
+
+  // Información de cliente de Db2 (CURRENT CLIENT_USERID / _APPLNAME / _ACCTNG) con el usuario, el programa y el
+  // trabajo de IBM i que ejecuta la sentencia: la recogen los desencadenantes de los diarios (DSPJRN).
+  // Solo hace falta antes de sentencias que cambian datos; se recuerda por conexión.
+  const MODIFIES = /^\s*(INSERT|UPDATE|DELETE|MERGE|CALL|TRUNCATE)\b/i;
+  async function setClient(conn, sql, client, wrk = '') {
+    const k = `${client}|${wrk}`;
+    if (!client || !MODIFIES.test(String(sql)) || conn.$client === k) return;
+    const [job, pgm = ''] = String(client).split(':');
+    const parts = job.split('/');
+    const user = parts.length === 3 ? parts[1] : 'QUSER';
+    try {
+      await runOn(conn, 'CALL SYSPROC.WLM_SET_CLIENT_INFO(?, ?, ?, ?, NULL)', [user.slice(0, 10), wrk || 'AS400TDS', (pgm || parts[2] || '').slice(0, 10), job.slice(0, 28)]);
+      conn.$client = k;
+    } catch { /* sin información de cliente */ }
   }
 
   // Ejecuta una sentencia sobre una conexión concreta (del pool o de una transacción).
@@ -157,10 +173,10 @@ export function createDb2Driver(cfg) {
     t.lastUsed = Date.now();
     return t;
   }
-  async function txExec(id, sql, params) {
+  async function txExec(id, sql, params, client = '') {
     const t = getTx(id);
     t.stmts++;
-    try { return await runOn(t.conn, sql, params); } catch (e) {
+    try { await setClient(t.conn, sql, client || t.client, id); return await runOn(t.conn, sql, params); } catch (e) {
       if (isConnError(e)) { txs.delete(id); try { t.conn.closeSync(); } catch { /* ignorar */ } }
       throw e;
     }
@@ -210,6 +226,10 @@ export function createDb2Driver(cfg) {
       for (const o of objs) {
         await exec(`DROP ${o.TYPE === 'V' ? 'VIEW' : o.TYPE === 'A' ? 'ALIAS' : 'TABLE'} "${name}"."${o.NAME}"`).catch(() => {});
       }
+      // Desencadenantes (p. ej. de diarios) que quedaran inoperativos, secuencias y rutinas del esquema
+      for (const t of await rows('SELECT TRIM(TRIGNAME) AS NAME FROM SYSCAT.TRIGGERS WHERE TRIGSCHEMA = ?', [name])) await exec(`DROP TRIGGER "${name}"."${t.NAME}"`).catch(() => {});
+      for (const s of await rows("SELECT TRIM(SEQNAME) AS NAME FROM SYSCAT.SEQUENCES WHERE SEQSCHEMA = ? AND SEQTYPE = 'S'", [name])) await exec(`DROP SEQUENCE "${name}"."${s.NAME}"`).catch(() => {});
+      for (const r of await rows('SELECT TRIM(SPECIFICNAME) AS NAME, ROUTINETYPE AS T FROM SYSCAT.ROUTINES WHERE ROUTINESCHEMA = ?', [name])) await exec(`DROP SPECIFIC ${r.T === 'F' ? 'FUNCTION' : 'PROCEDURE'} "${name}"."${r.NAME}"`).catch(() => {});
       await exec(`DROP SCHEMA "${name}" RESTRICT`);
     },
     async schemas() {

@@ -60,6 +60,8 @@ async function seedBank() {
     }
   }
   await obj.syncSqlTables('BANCO');
+  // Como un esquema SQL de IBM i: diario BANCO/QSQJRN con todas las tablas (los programas usan COMMIT = *CHG)
+  await (await import('../journal.js')).ensureSqlJournal(null, 'BANCO');
 
   // Perfiles del banco
   if (!(await obj.getUser('BANCOSRV'))) await obj.createUser({ name: 'BANCOSRV', password: 'BANCOSRV', usrcls: '*USER', text: 'Usuario de servicio de canales', curlib: 'BANCO' });

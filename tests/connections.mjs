@@ -83,6 +83,10 @@ await step('sql', 'Control de compromiso: ROLLBACK deshace y COMMIT confirma', a
   await api('POST', '/api/v1/commands', { command: 'ROLLBACK' });
   await api('POST', '/api/v1/commands', { command: 'ENDCMTCTL' });
   await api('POST', '/api/v1/sql', { sql: 'CREATE TABLE CONNTEST.TXT (ID INTEGER NOT NULL PRIMARY KEY, TXT VARCHAR(20))' });
+  // En IBM i el control de compromiso exige que la tabla esté en un diario
+  await api('POST', '/api/v1/commands', { command: 'CRTJRNRCV JRNRCV(CONNTEST/RCV0001)' });
+  await api('POST', '/api/v1/commands', { command: 'CRTJRN JRN(CONNTEST/JRN) JRNRCV(CONNTEST/RCV0001)' });
+  await api('POST', '/api/v1/commands', { command: 'STRJRNPF FILE(CONNTEST/TXT) JRN(CONNTEST/JRN)' });
   // Mapepire/host servers prueban transacciones de sesión; por REST se usa un programa CL con STRCMTCTL
   const r = await api('POST', '/api/v1/commands', { command: 'STRCMTCTL LCKLVL(*CHG)' });
   assert(r.json.ok || /already active/.test(r.text), r.text);

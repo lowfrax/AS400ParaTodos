@@ -31,6 +31,9 @@ export class Ctx {
   }
   get client() { return `${this.job.number}/${this.job.user}/${this.job.name}`; }
   async sql(text, params = [], opts = {}) {
+    // El usuario del trabajo es el propietario de lo que se cree y el sujeto de las comprobaciones de autorización
+    const { withCtx, currentCtx } = await import('./security.js');
+    if (currentCtx() !== this) return withCtx(this, () => this.sql(text, params, opts));
     // Servicios SQL de IBM i (QSYS2.QCMDEXC, HTTP_GET, colas de datos, vistas de catálogo…) se resuelven en el núcleo.
     const { sqlServices } = await import('./sql/services.js');
     const handled = await sqlServices(this, String(text), params, opts);
@@ -39,6 +42,8 @@ export class Ctx {
     const q = opts.raw ? text : await qualifySql(text, this.libl, this.curlib);
     const denied = await this.sqlAuthority(q);
     if (denied) return denied;
+    const notJournaled = await this.sqlJournalCheck(q);
+    if (notJournaled) return notJournaled;
     await this.ensureCommit();
     const r = await gw.sql(q, params, { client: this.client, tx: this.job.cmt?.tx });
     // DROP TABLE/VIEW por SQL elimina también el objeto *FILE (la creación la recoge findObject)
@@ -47,8 +52,43 @@ export class Ctx {
       const { forgetSqlObject } = await import('./objects.js');
       await forgetSqlObject(drop[1].toUpperCase(), drop[2].toUpperCase());
     }
+    if (!r.error) await this.sqlDdlHooks(q);
     if (r.error && this.job.qtemp) r.error = String(r.error).split(qtempName(this.job)).join('QTEMP');
     return r;
+  }
+
+  /** Bajo control de compromiso, cambiar una tabla que no está en un diario da SQL7008 (código de razón 3). */
+  async sqlJournalCheck(q) {
+    if (!this.job.cmt || ['*NONE', '*NC'].includes(this.job.cmt.level)) return null;
+    const sec = await import('./security.js');
+    const J = await import('./journal.js');
+    for (const t of sec.sqlTargets(q)) {
+      if (!['ADD', 'UPD', 'DLT', 'CHANGE'].includes(t.need) || SYSTEM_LIBS.includes(t.lib) || t.lib === qtempName(this.job)) continue;
+      if (!(await sec.objectRow(t.lib, t.name, '*FILE'))) continue;
+      if (!(await J.journalOf(t.lib, t.name))) {
+        return { error: `SQL7008N  ${t.name} in ${t.lib} not valid for operation. Reason code 3: the table is not journaled and commitment control is active (${this.job.cmt.level}).  SQLSTATE=55019`, sqlstate: '55019', sqlcode: -7008, columns: [], rows: [] };
+      }
+    }
+    return null;
+  }
+
+  /** CREATE SCHEMA crea la biblioteca con su diario QSQJRN; CREATE TABLE en ella queda registrada en el diario. */
+  async sqlDdlHooks(q) {
+    let m = /^\s*CREATE\s+(?:SCHEMA|COLLECTION)\s+"?([A-Z#@$][\w#@$]*)"?/i.exec(q);
+    if (m) {
+      const lib = m[1].toUpperCase();
+      const obj = await import('./objects.js');
+      if (!(await obj.libExists(lib))) await gw.exec("INSERT INTO QSYS.OBJECTS (LIB, NAME, TYPE, ATTR, TEXT, OWNER, CREATED, CHANGED) VALUES ('QSYS', ?, '*LIB', 'PROD', 'SQL schema', ?, CURRENT TIMESTAMP, CURRENT TIMESTAMP)", [lib, this.job.user]);
+      await (await import('./journal.js')).ensureSqlJournal(this.job, lib, { journalExisting: false });
+      return;
+    }
+    m = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+"?([A-Z#@$][\w#@$]*)"?\s*\.\s*"?([A-Z#@$][\w#@$]*)"?/i.exec(q);
+    if (m) {
+      const [lib, file] = [m[1].toUpperCase(), m[2].toUpperCase()];
+      const obj = await import('./objects.js');
+      await obj.findObject(gw, file, '*FILE', lib, []);
+      await (await import('./journal.js')).autoJournal(this.job, lib, file);
+    }
   }
 
   /** Autorización de objeto sobre las tablas de una sentencia (SQL0551 / SQLSTATE 42501). */
@@ -82,6 +122,7 @@ export class Ctx {
   async commit({ hold = false } = {}) {
     const c = this.job.cmt;
     if (!c || !c.tx) return { ok: true };
+    await (await import('./journal.js')).commitEntries(this.job, c.tx).catch(() => {});
     const r = await gw.commit(c.tx, { client: this.client });
     c.tx = null;
     return r;
@@ -89,8 +130,12 @@ export class Ctx {
   async rollback() {
     const c = this.job.cmt;
     if (!c || !c.tx) return { ok: true };
-    const r = await gw.rollback(c.tx, { client: this.client });
+    const J = await import('./journal.js');
+    const tx = c.tx;
+    const pending = await J.pendingEntries(tx);
+    const r = await gw.rollback(tx, { client: this.client });
     c.tx = null;
+    await J.rollbackEntries(this.job, tx, pending).catch(() => {});
     return r;
   }
   async endCommit({ commit = false } = {}) {

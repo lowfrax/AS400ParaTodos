@@ -163,10 +163,18 @@ CALL ${LIB}.SUBIR(10);`;
   const pr = await rows(`SELECT ID, NOMBRE, PRECIO FROM ${LIB}.PRODUCTOS ORDER BY ID`);
   check('RUNSQLSTM: literales y comentarios con ";" y procedimiento BEGIN…END', pr.length === 3 && /Teclado; inalambrico/.test(S(pr)) && Math.abs(Number(pr[1].PRECIO) - 10.98) < 0.011, S(pr));
   await api('PUT', '/ifs/tmp/utiltest.sql', `INSERT INTO ${LIB}.PRODUCTOS VALUES (4, 'Cable', 3.00);\nINSERT INTO ${LIB}.NOEXISTE VALUES (1);\n`, false, 'text/plain');
+  await cmd(`CRTJRNRCV JRNRCV(${LIB}/RCV0001)`);
+  await cmd(`CRTJRN JRN(${LIB}/JRN) JRNRCV(${LIB}/RCV0001)`);
+  await cmd(`STRJRNPF FILE(${LIB}/PRODUCTOS) JRN(${LIB}/JRN) IMAGES(*BOTH)`);
   const re = await cmd(`RUNSQLSTM SRCSTMF('/tmp/utiltest.sql') COMMIT(*CHG) ERRLVL(20)`, false);
   check('RUNSQLSTM con error de gravedad 30 > ERRLVL: SQL9010', re.error && re.error.id === 'SQL9010', S(re));
   const after = await rows(`SELECT COUNT(*) AS N FROM ${LIB}.PRODUCTOS`);
   check('RUNSQLSTM COMMIT(*CHG) deshace las sentencias si falla', Number(after[0] && after[0].N) === 3, S(after));
+  const pt = await rows(`SELECT COUNT(*) AS N FROM QSYS.JRNENT WHERE JRNLIB = '${LIB}' AND OBJ = 'PRODUCTOS' AND ENTT = 'PT'`);
+  check('el INSERT deshecho queda en el diario (R/PT)', Number(pt[0] && pt[0].N) >= 1, S(pt));
+  const rb = await rows(`SELECT ENTT FROM QSYS.JRNENT WHERE JRNLIB = '${LIB}' AND ENTT IN ('DR', 'RB') ORDER BY SEQ`);
+  check('ROLLBACK: entradas R/DR y C/RB, como en IBM i', rb.map((r) => r.ENTT).join(',') === 'DR,RB', S(rb));
+  await cmd(`ENDJRNPF FILE(${LIB}/PRODUCTOS)`);
 
   // ---------- Objetos ----------
   const dup = await cmd(`CRTDUPOBJ OBJ(CLIENTES) FROMLIB(${LIB}) OBJTYPE(*FILE) TOLIB(${LIB2}) DATA(*YES)`, false);

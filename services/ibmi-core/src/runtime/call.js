@@ -45,13 +45,19 @@ export async function callProgram(ctx, name, lib, refs = []) {
   setStatus(job, 'RUN', `PGM-${name}`);
   ctx.pgmMsgs = [];
   enterCall(job);
+  const depth = job.callDepth || 0;
+  let normal = false;
   try {
     if (data.kind === 'CL') {
       await runCl(ctx, name, data.ir, refs);
     } else {
       await runRpg(ctx, { ...o, $modules: data.modules || [], $entry: data.entmod }, name, key, data.ir, refs);
     }
+    normal = true;
   } finally {
+    // El control de compromiso que inició el propio programa (SET OPTION COMMIT / CRTSQLRPGI COMMIT) termina
+    // con él, como al finalizar su grupo de activación: confirmación si acaba con normalidad, retrotracción si no
+    if (job.cmt && job.cmt.auto && job.cmt.autoDepth === depth) await ctx.endCommit({ commit: normal }).catch(() => { job.cmt = null; });
     job.function = prevFn;
     // Las alteraciones (OVRDBF/OVRPRTF) del nivel de llamada del programa terminan con él
     leaveCall(job);
@@ -68,7 +74,7 @@ function withPosition(desc, f) {
 
 function makeHost(ctx, pgmName) {
   const job = ctx.job;
-  const client = `${qualifiedJob(job)}`;
+  const client = `${qualifiedJob(job)}:${pgmName || ''}`;
   const printers = [];
   const host = {
     user: job.user,
@@ -108,7 +114,7 @@ function makeHost(ctx, pgmName) {
     async sqlControl(verb, o = {}) {
       try {
         if (verb === 'OPTION') {
-          if (o.commit && o.commit !== '*NONE' && !job.cmt) { await ctx.startCommit(o.commit); job.cmt.auto = true; }
+          if (o.commit && o.commit !== '*NONE' && !job.cmt) { await ctx.startCommit(o.commit); job.cmt.auto = true; job.cmt.autoDepth = job.callDepth || 0; }
           return null;
         }
         const r = verb === 'COMMIT' ? await ctx.commit(o) : await ctx.rollback(o);
@@ -182,7 +188,7 @@ function makeHost(ctx, pgmName) {
 async function runRpg(ctx, o, name, key, ir, refs) {
   const job = ctx.job;
   // CRTSQLRPGI COMMIT(*CHG|*CS|…): el programa trabaja bajo control de compromiso, como con SET OPTION COMMIT
-  if (ir.$commit && !job.cmt) { await ctx.startCommit(ir.$commit === '*UR' ? '*CHG' : ir.$commit === '*RS' ? '*ALL' : ir.$commit); job.cmt.auto = true; }
+  if (ir.$commit && !job.cmt) { await ctx.startCommit(ir.$commit === '*UR' ? '*CHG' : ir.$commit === '*RS' ? '*ALL' : ir.$commit); job.cmt.auto = true; job.cmt.autoDepth = job.callDepth || 0; }
   let entry = job.activations.get(key);
   let prog;
   if (entry) prog = entry;

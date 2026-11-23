@@ -92,7 +92,7 @@ async function runSql(sql, params, client = 'anon', tx = null) {
   state.inflight++;
   const entry = { id, ts: Date.now(), client, verb, sql: String(sql).slice(0, 2000), params: (params || []).slice(0, 20).map((p) => (typeof p === 'string' && p.length > 200 ? `${p.slice(0, 200)}…` : p)), ...(tx ? { tx } : {}) };
   try {
-    const r = tx ? await driver.txExec(tx, sql, params) : await driver.exec(sql, params);
+    const r = tx ? await driver.txExec(tx, sql, params, client) : await driver.exec(sql, params, client);
     entry.ms = +(performance.now() - t0).toFixed(2);
     entry.ok = true;
     entry.rows = r.rowCount;

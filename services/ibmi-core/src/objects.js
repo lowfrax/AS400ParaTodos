@@ -58,6 +58,14 @@ const DDL = [
      FROMUSR VARCHAR(10) NOT NULL DEFAULT '', FROMJOB VARCHAR(28) NOT NULL DEFAULT '', SENT TIMESTAMP,
      REPLY VARCHAR(132) NOT NULL DEFAULT '', STATUS VARCHAR(10) NOT NULL DEFAULT 'NEW')`,
   `CREATE TABLE QSYS.SYSVAL (NAME VARCHAR(10) NOT NULL PRIMARY KEY, SVALUE VARCHAR(256) NOT NULL DEFAULT '', TEXT VARCHAR(50) NOT NULL DEFAULT '')`,
+  // Diarios: entradas, archivos registrados y receptor conectado de cada diario (journal.js)
+  `CREATE TABLE QSYS.JRNENT (JRNLIB VARCHAR(10) NOT NULL, JRN VARCHAR(10) NOT NULL, SEQ BIGINT NOT NULL, CODE CHAR(1) NOT NULL,
+     ENTT CHAR(2) NOT NULL, TS TIMESTAMP NOT NULL, JOB VARCHAR(28), USR VARCHAR(10), PGM VARCHAR(10), OBJLIB VARCHAR(10),
+     OBJ VARCHAR(10), MBR VARCHAR(10), RCVLIB VARCHAR(10), RCV VARCHAR(10), DATA CLOB(1M), CCID VARCHAR(40), PRIMARY KEY (JRNLIB, JRN, SEQ))`,
+  `CREATE TABLE QSYS.JRNPF (LIB VARCHAR(10) NOT NULL, FILE VARCHAR(10) NOT NULL, JRNLIB VARCHAR(10) NOT NULL, JRN VARCHAR(10) NOT NULL,
+     IMAGES VARCHAR(7) NOT NULL DEFAULT '*AFTER', OMTJRNE VARCHAR(8) NOT NULL DEFAULT '*OPNCLO', STARTED TIMESTAMP, PRIMARY KEY (LIB, FILE))`,
+  `CREATE TABLE QSYS.JRNATT (JRNLIB VARCHAR(10) NOT NULL, JRN VARCHAR(10) NOT NULL, RCVLIB VARCHAR(10) NOT NULL, RCV VARCHAR(10) NOT NULL,
+     PRIMARY KEY (JRNLIB, JRN))`,
   // Autorizaciones privadas, *PUBLIC y lista de autorizaciones de cada objeto (GRTOBJAUT / RVKOBJAUT)
   `CREATE TABLE QSYS.OBJAUT (LIB VARCHAR(10) NOT NULL, NAME VARCHAR(10) NOT NULL, TYPE VARCHAR(10) NOT NULL, USR VARCHAR(10) NOT NULL,
      AUT VARCHAR(160) NOT NULL DEFAULT '', PRIMARY KEY (LIB, NAME, TYPE, USR))`,
@@ -131,6 +139,8 @@ export async function initSchema() {
     const r = await gw.sql(`ALTER TABLE QSYS.USRPRF ADD COLUMN PWDTOKEN VARCHAR(256) NOT NULL DEFAULT ''`);
     if (r.error && r.sqlstate !== '42711') throw new Error(`QSYS.USRPRF: ${r.error}`);
   }
+  // Migración: ciclo de compromiso de las entradas de diario
+  { const jc = await gw.columns('QSYS', 'JRNENT'); if (Array.isArray(jc) && jc.length && !jc.some((x) => x.name === 'CCID')) await gw.sql('ALTER TABLE QSYS.JRNENT ADD COLUMN CCID VARCHAR(40)'); }
   // Migración: autorizaciones especiales y perfil de grupo de los perfiles de usuario
   for (const [c, ddl] of [['SPCAUT', "VARCHAR(160) NOT NULL DEFAULT '*USRCLS'"], ['GRPPRF', "VARCHAR(10) NOT NULL DEFAULT '*NONE'"]]) {
     if (Array.isArray(cols) && !cols.some((x) => x.name === c)) {
@@ -174,11 +184,19 @@ export async function createLibrary(lib, text = '', type = 'PROD', owner = 'QSEC
 export async function deleteLibrary(lib) {
   if (!(await libExists(lib))) throw new CLError('CPF2110', lib);
   if (SYSTEM_LIBS.includes(lib) || lib === 'QGPL') throw new CLError('CPF2165', lib);
+  // Los archivos de otras bibliotecas registrados en un diario de esta dejan de estarlo
+  const J = await import('./journal.js');
+  for (const f of await gw.rows('SELECT LIB, FILE FROM QSYS.JRNPF WHERE JRNLIB = ? AND LIB <> ?', [lib, lib]).catch(() => [])) await J.endJournal(null, f.LIB, f.FILE).catch(() => {});
+  for (const s of await gw.rows("SELECT NAME FROM QSYS.OBJECTS WHERE LIB = ? AND TYPE = '*JRN'", [lib]).catch(() => [])) await gw.sql(`DROP SEQUENCE QSYS."JQ_${lib}_${s.NAME}"`);
   await gw.schema(lib, true).catch(() => {});
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ?`, [lib]);
   await gw.sql(`DELETE FROM QSYS.OBJAUT WHERE LIB = ? OR (LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB')`, [lib, lib]);
+  await gw.sql(`DELETE FROM QSYS.JRNPF WHERE LIB = ? OR JRNLIB = ?`, [lib, lib]);
+  await gw.sql(`DELETE FROM QSYS.JRNATT WHERE JRNLIB = ?`, [lib]);
+  await gw.sql(`DELETE FROM QSYS.JRNENT WHERE JRNLIB = ?`, [lib]);
+  (await import('./journal.js')).invalidateJournaled();
   (await import('./security.js')).invalidateAuth();
   // Entradas de las colas de datos de la biblioteca (QSYS.DTAQE existe desde el IPL)
   await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ?`, [lib]);
@@ -226,6 +244,8 @@ export async function deleteObject(lib, name, type) {
     const deps = await dependentLogicals(lib, name);
     if (deps.length) throw new CLError('CPF3220', name, lib, deps[0].NAME, deps[0].LIB);
     await gw.exec(`DROP TABLE ${lib}.${name}`).catch(() => {});
+    await gw.sql(`DELETE FROM QSYS.JRNPF WHERE LIB = ? AND FILE = ?`, [lib, name]);
+    (await import('./journal.js')).invalidateJournaled();
   }
   if (type === '*FILE' && o[0].ATTR === 'LF') await gw.exec(`DROP VIEW ${lib}.${name}`).catch(() => {});
   if (type === '*FILE' && o[0].ATTR === 'PF-SRC') {
