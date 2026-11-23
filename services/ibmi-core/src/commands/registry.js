@@ -182,7 +182,10 @@ export async function runCommand(ctx, text, opts = {}) {
     if (e instanceof CLSyntaxError) throw new CLError(e.msgId, e.message);
     throw e;
   }
-  const cmd = COMMANDS.get(parsed.name);
+  // Los mandatos del sistema (QSYS) van primero en la lista; BIB/MANDATO o un nombre que no es del sistema busca *CMD
+  const sysLib = !parsed.lib || ['QSYS', '*LIBL', '*SYSTEM', '*NLVLIBL'].includes(String(parsed.lib).toUpperCase());
+  let cmd = sysLib ? COMMANDS.get(parsed.name) : null;
+  if (!cmd && ctx.job) { const { resolveUserCommand } = await import('./usercmd.js'); cmd = await resolveUserCommand(ctx, parsed.name, sysLib ? '*LIBL' : parsed.lib); }
   if (!cmd) throw new CLError('CPD0030', parsed.name, parsed.lib || '*LIBL');
   if (cmd.interactive && !ctx.interactive) throw new CLError('CPD0031', cmd.name);
   let given = bindArgs(cmd, parsed);

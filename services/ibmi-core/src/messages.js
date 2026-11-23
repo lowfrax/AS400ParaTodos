@@ -32,6 +32,7 @@ const M = {
   CPF9820: [40, 'Not authorized to use library &1.', 'You need *EXECUTE authority to library &1.', 'Ask your security officer to grant you *EXECUTE authority to the library (GRTOBJAUT).'],
   CPF2189: [40, 'Not authorized to object &1 in &2 type &3.', 'You need *OBJEXIST authority to delete or rename the object.', 'Ask the object owner or your security officer for the authority.'],
   CPF2217: [40, 'Not authorized to user profile &1.'],
+  CPF0201: [40, 'Command &1 not created in library &2.', 'Errors were found in the command definition source.', 'See the diagnostic messages in the job log and the listing, correct the source and create the command again.'],
   CPF9814: [40, 'Device &1 not found.', 'Only save files (DEV(*SAVF)) are available on this system.', 'Specify DEV(*SAVF) and a save file (CRTSAVF).'],
   CPF3770: [40, 'No objects saved or restored for library &1.'],
   CPF3773: [40, '&1 not restored to library &2. &3'],

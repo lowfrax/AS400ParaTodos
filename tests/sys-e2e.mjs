@@ -338,6 +338,80 @@ ENDPGM`);
     for (const f of ['SVCSAVF', 'SVCSAVF2', 'SVCCHG', 'SECSAVF']) await cmd(`DLTF FILE(QGPL/${f})`);
   }
 
+  if (want('cmd')) {
+    await cmd(`CRTSRCPF FILE(${LIB}/QCMDSRC)`);
+    await cmd(`CRTSRCPF FILE(${LIB}/QCLSRC)`);
+    await cmd(`CRTDTAARA DTAARA(${LIB}/RES) TYPE(*CHAR) LEN(60)`);
+    await put('QCMDSRC', 'SALUDAR', 'CMD', [
+      "             CMD        PROMPT('Saludar a un cliente')",
+      "             PARM       KWD(NOMBRE) TYPE(*CHAR) LEN(20) MIN(1) +",
+      "                          PROMPT('Nombre del cliente') CASE(*MIXED)",
+      "             PARM       KWD(VECES) TYPE(*DEC) LEN(3 0) DFT(1) PROMPT('Veces')",
+      "             PARM       KWD(SALIDA) TYPE(Q1) MIN(1) PROMPT('Area de datos')",
+      "             PARM       KWD(FORMAL) TYPE(*CHAR) LEN(4) RSTD(*YES) VALUES(*YES *NO) DFT(*NO) PROMPT('Formal')",
+      " Q1:         QUAL       TYPE(*NAME) LEN(10)",
+      "             QUAL       TYPE(*NAME) LEN(10) DFT(*LIBL) SPCVAL((*LIBL) (*CURLIB)) PROMPT('Biblioteca')",
+    ].join('\n'));
+    await put('QCLSRC', 'SALUDARC', 'CLP', [
+      'PGM PARM(&NOMBRE &VECES &SALIDA &FORMAL)',
+      '  DCL VAR(&NOMBRE) TYPE(*CHAR) LEN(20)',
+      '  DCL VAR(&VECES) TYPE(*DEC) LEN(3 0)',
+      '  DCL VAR(&SALIDA) TYPE(*CHAR) LEN(20)',
+      '  DCL VAR(&FORMAL) TYPE(*CHAR) LEN(4)',
+      '  DCL VAR(&DA) TYPE(*CHAR) LEN(10)',
+      '  DCL VAR(&LIB) TYPE(*CHAR) LEN(10)',
+      '  DCL VAR(&TXT) TYPE(*CHAR) LEN(60)',
+      '  DCL VAR(&N) TYPE(*CHAR) LEN(3)',
+      '  CHGVAR VAR(&DA) VALUE(%SST(&SALIDA 1 10))',
+      '  CHGVAR VAR(&LIB) VALUE(%SST(&SALIDA 11 10))',
+      '  CHGVAR VAR(&N) VALUE(&VECES)',
+      "  IF COND(&FORMAL *EQ '*YES') THEN(CHGVAR VAR(&TXT) VALUE('Estimado' *BCAT &NOMBRE))",
+      "  ELSE CMD(CHGVAR VAR(&TXT) VALUE('Hola' *BCAT &NOMBRE))",
+      "  CHGVAR VAR(&TXT) VALUE(&TXT *TCAT ' x' *CAT &N)",
+      '  CHGDTAARA DTAARA(&LIB/&DA) VALUE(&TXT)',
+      'ENDPGM',
+    ].join('\n'));
+    await put('QCLSRC', 'SALUDARV', 'CLP', [
+      'PGM PARM(&NOMBRE &VECES &SALIDA &FORMAL)',
+      '  DCL VAR(&NOMBRE) TYPE(*CHAR) LEN(20)',
+      '  DCL VAR(&VECES) TYPE(*DEC) LEN(3 0)',
+      '  DCL VAR(&SALIDA) TYPE(*CHAR) LEN(20)',
+      '  DCL VAR(&FORMAL) TYPE(*CHAR) LEN(4)',
+      "  IF COND(&VECES *GT 5) THEN(SNDPGMMSG MSGID(CPF9898) MSGF(QCPFMSG) MSGDTA('Como mucho 5 veces') MSGTYPE(*ESCAPE))",
+      'ENDPGM',
+    ].join('\n'));
+    for (const p of ['SALUDARC', 'SALUDARV']) await cmd(`CRTBNDCL PGM(${LIB}/${p}) SRCFILE(${LIB}/QCLSRC)`);
+    const cc = await cmd(`CRTCMD CMD(${LIB}/SALUDAR) PGM(${LIB}/SALUDARC) SRCFILE(${LIB}/QCMDSRC) VLDCKR(${LIB}/SALUDARV)`);
+    check('CRTCMD', ok(cc) && /SALUDAR created/.test(JSON.stringify(cc)), cc);
+    await cmd(`ADDLIBLE LIB(${LIB})`);
+    const r1 = await cmd(`SALUDAR NOMBRE('Ana Lopez') SALIDA(${LIB}/RES)`);
+    const v1 = JSON.stringify(await cmd(`DSPDTAARA DTAARA(${LIB}/RES)`));
+    check('el mandato llama al CPP con *CHAR (mayúsculas/minúsculas), *DEC por omisión y nombre cualificado', ok(r1) && /Hola Ana Lopez x\s*0*1/.test(v1), [r1, v1]);
+    const r2 = await cmd(`${LIB}/SALUDAR 'Luis' 3 RES *YES`);
+    const v2 = JSON.stringify(await cmd(`DSPDTAARA DTAARA(${LIB}/RES)`));
+    check('parámetros posicionales, cualificado BIB/MANDATO y QUAL con *LIBL', ok(r2) && /Estimado Luis x\s*0*3/.test(v2), [r2, v2]);
+    check('parámetro obligatorio que falta: CPD0072', errId(await cmd(`SALUDAR SALIDA(${LIB}/RES)`)) === 'CPD0072');
+    check('RSTD(*YES) con un valor no permitido: CPD0074', errId(await cmd(`SALUDAR NOMBRE(X) SALIDA(${LIB}/RES) FORMAL(QUIZA)`)) === 'CPD0074');
+    check('palabra clave desconocida: CPD0043', errId(await cmd(`SALUDAR NOMBRE(X) SALIDA(${LIB}/RES) COLOR(ROJO)`)) === 'CPD0043');
+    const vk = await cmd(`SALUDAR NOMBRE(X) VECES(9) SALIDA(${LIB}/RES)`);
+    check('el programa de validación (VLDCKR) rechaza VECES(9): CPF0006', errId(vk) === 'CPF0006' && /Como mucho 5 veces/.test(JSON.stringify(vk)), vk);
+    const dc = JSON.stringify(await cmd(`DSPCMD CMD(${LIB}/SALUDAR)`));
+    check('DSPCMD', /SALUDARC/.test(dc) && /NOMBRE\s+\*CHAR/.test(dc) && /Saludar a un cliente/.test(dc), dc);
+    // Un mandato de usuario con el nombre de uno del sistema solo se usa cualificado
+    await put('QCMDSRC', 'DSPLIBL', 'CMD', "             CMD        PROMPT('Mi DSPLIBL')\n             PARM       KWD(NOMBRE) TYPE(*CHAR) LEN(20) DFT('sistema no')\n             PARM       KWD(VECES) TYPE(*DEC) LEN(3 0) DFT(7)\n             PARM       KWD(SALIDA) TYPE(*CHAR) LEN(20) DFT(RES)\n             PARM       KWD(FORMAL) TYPE(*CHAR) LEN(4) DFT(*NO)");
+    await cmd(`CRTCMD CMD(${LIB}/DSPLIBL) PGM(${LIB}/SALUDARC) SRCFILE(${LIB}/QCMDSRC)`);
+    check('DSPLIBL sin cualificar es el del sistema (QSYS va primero)', /Library List/.test(JSON.stringify(await cmd('DSPLIBL'))));
+    const bad = [
+      "             CMD        PROMPT('Erroneo')",
+      '             PARM       TYPE(*CHAR) LEN(10)',
+    ].join('\n');
+    await put('QCMDSRC', 'MALO', 'CMD', bad);
+    const cb = await cmd(`CRTCMD CMD(${LIB}/MALO) PGM(${LIB}/SALUDARC) SRCFILE(${LIB}/QCMDSRC)`);
+    check('fuente erróneo: CPF0201 con diagnóstico CPD0204', errId(cb) === 'CPF0201' && /CPD0204/.test(JSON.stringify(cb.joblog || [])), cb);
+    check('DLTCMD', ok(await cmd(`DLTCMD CMD(${LIB}/SALUDAR)`)) && errId(await cmd(`SALUDAR NOMBRE(X) SALIDA(${LIB}/RES)`)) === 'CPD0030');
+    await cmd(`RMVLIBLE LIB(${LIB})`);
+  }
+
   if (!failed) await cmd(`DLTLIB LIB(${LIB})`);
   console.log(failed ? `\n${failed} FALLOS` : '\nTodo correcto');
   process.exit(failed ? 1 : 0);

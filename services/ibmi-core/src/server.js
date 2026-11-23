@@ -22,6 +22,7 @@ import './commands/sda.js';
 import './commands/security.js';
 import './commands/journal.js';
 import './commands/savrst.js';
+import './commands/usercmd.js';
 import { startScheduler } from './commands/util.js';
 import { initIfs, homeDir } from './ifs.js';
 import { initDtaq } from './dtaq.js';
