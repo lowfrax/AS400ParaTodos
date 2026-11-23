@@ -3,7 +3,8 @@ import { evalCL, truthyCL, parseCommand, splitList, unquote, quote, qualified } 
 import { RpgCancel } from '../../../../shared/rpg/interpreter.js';
 import { CLError, msgText } from '../messages.js';
 import { logJob, sysDate, sysTime, SYS, qualifiedJob } from '../system.js';
-import { sysval, gw, findObject, objectData, putObject } from '../objects.js';
+import { sysval, gw, findObject, objectData, putObject, sendToQueue } from '../objects.js';
+import { getMsgd, formatMsg } from '../msgf.js';
 
 class Goto { constructor(label) { this.label = label; } }
 const LEAVE = { s: 'leave' };
@@ -41,6 +42,10 @@ export async function runCl(ctx, pgmName, ir, refs) {
     if (v && refs[i]) { v.value = coerceCl(v, refs[i].get()); bound.push([v, refs[i]]); }
   });
   const getVar = (n) => vars.get(n.toUpperCase());
+  // Cola de mensajes del programa: escapes monitorizados, mensajes de terminación de los mandatos y SNDPGMMSG TOPGMQ(*SAME)
+  const pgmq = [];
+  let msgKey = 0;
+  const qmsg = (m) => { pgmq.push({ key: ++msgKey, data: '', msgf: '', sev: 0, ...m }); };
 
   const matches = (monmsg, id) => monmsg.msgids.some((m) => m === id || (m.endsWith('0000') && id.startsWith(m.slice(0, 3))) || (m.endsWith('00') && id.startsWith(m.slice(0, 5))));
 
@@ -78,17 +83,76 @@ export async function runCl(ctx, pgmName, ir, refs) {
     const cmd = node.cmd;
     const { runCommand } = await import('../commands/registry.js');
     switch (cmd.name) {
-      case 'SNDPGMMSG': {
-        const msgid = (pv(cmd, 'MSGID', 1) || '').toUpperCase();
+      case 'SNDPGMMSG': case 'SNDUSRMSG': {
+        // SNDPGMMSG MSG() | MSGID() MSGF() MSGDTA() TOPGMQ(*PRV|*SAME|*EXT) TOMSGQ() MSGTYPE() KEYVAR()
+        const msgid = unquote(substitute(pv(cmd, 'MSGID', 1) || '')).toUpperCase();
+        const msgfQ = unquote(substitute(pv(cmd, 'MSGF', 2) || 'QCPFMSG'));
         const raw = pv(cmd, 'MSG', 0);
-        const dta = pv(cmd, 'MSGDTA', 3);
-        const text = raw ? unquote(substitute(raw)) : msgid ? msgText(msgid, unquote(substitute(dta || "''"))) : '';
-        const type = (pv(cmd, 'MSGTYPE', 6) || '*INFO').toUpperCase();
-        logJob(ctx.job, msgid, type, text, { sev: type === '*ESCAPE' ? 40 : 0 });
-        if (type === '*ESCAPE') { const e = new CLError('CPF9898', text); e.msgId = msgid || 'CPF9898'; throw e; }
-        ctx.pgmMsgs.push({ id: msgid, text, sev: type === '*DIAG' ? 30 : 0 });
+        const dta = unquote(substitute(pv(cmd, 'MSGDTA', 3) || "''"));
+        let text = raw ? unquote(substitute(raw)) : '';
+        let sev = 0;
+        if (!raw && msgid) {
+          const d = await getMsgd(ctx, msgid, msgfQ);
+          text = formatMsg(d, dta).text;
+          sev = d.sev || 0;
+        }
+        const type = (pv(cmd, 'MSGTYPE', 6) || (cmd.name === 'SNDUSRMSG' ? '*INQ' : '*INFO')).toUpperCase();
+        const topgmq = String(pv(cmd, 'TOPGMQ', 4) || '*PRV').toUpperCase().replace(/[()]/g, ' ').trim().split(/\s+/)[0];
+        const tomsgq = pv(cmd, 'TOMSGQ', 5) ? unquote(substitute(pv(cmd, 'TOMSGQ', 5))).toUpperCase() : null;
+        if (tomsgq && tomsgq !== '*TOPGMQ') {
+          const q = tomsgq === '*SYSOPR' ? 'QSYSOPR' : tomsgq.replace(/^.*\//, '');
+          await sendToQueue(q, text, { msgid, type, sev, from: ctx.job.user, fromJob: qualifiedJob(ctx.job) });
+          if (cmd.params.KEYVAR) setVar(cmd.params.KEYVAR, String(++msgKey).padStart(4, '0'));
+          return;
+        }
+        logJob(ctx.job, msgid, type, text, { sev: type === '*ESCAPE' ? Math.max(40, sev) : sev, data: dta });
+        if (type === '*ESCAPE') {
+          const e = new CLError(msgid || 'CPF9898', text);
+          e.message = text;
+          e.msgId = msgid || 'CPF9898';
+          e.msgdta = dta;
+          e.msgf = msgfQ;
+          throw e;
+        }
+        if (type === '*STATUS') { ctx.job.statusMsg = text; return; }
+        if (cmd.params.KEYVAR) setVar(cmd.params.KEYVAR, String(msgKey + 1).padStart(4, '0'));
+        if (topgmq === '*SAME') qmsg({ id: msgid, type, text, data: dta, msgf: msgfQ, sev });
+        else ctx.pgmMsgs.push({ id: msgid, text, sev: type === '*DIAG' ? Math.max(sev, 30) : sev, type, data: dta });
         return;
       }
+      case 'RTVMSG': {
+        // RTVMSG MSGID() MSGF() MSGDTA() MSG(&) MSGLEN(&) SECLVL(&) SECLVLLEN(&) SEV(&)
+        const msgid = unquote(substitute(pv(cmd, 'MSGID', 0) || '')).toUpperCase();
+        const d = await getMsgd(ctx, msgid, unquote(substitute(pv(cmd, 'MSGF', 1) || 'QCPFMSG')));
+        const f = formatMsg(d, unquote(substitute(pv(cmd, 'MSGDTA', 2) || "''")));
+        if (cmd.params.MSG) setVar(cmd.params.MSG, f.text);
+        if (cmd.params.MSGLEN) setVar(cmd.params.MSGLEN, f.text.length);
+        if (cmd.params.SECLVL) setVar(cmd.params.SECLVL, f.seclvl);
+        if (cmd.params.SECLVLLEN) setVar(cmd.params.SECLVLLEN, f.seclvl.length);
+        if (cmd.params.SEV) setVar(cmd.params.SEV, d.sev || 0);
+        return;
+      }
+      case 'RCVMSG': {
+        // RCVMSG PGMQ(*SAME) MSGTYPE(*ANY|*LAST|*EXCP|*COMP|*DIAG|*INFO|*FIRST|*NEXT) RMV(*YES|*NO) MSG(&) MSGDTA(&) MSGID(&) SEV(&) MSGF(&) MSGTYPE
+        const want = String(pv(cmd, 'MSGTYPE', 1) || '*ANY').toUpperCase();
+        const rmv = String(cmd.params.RMV || '*YES').toUpperCase() !== '*NO';
+        const typeOk = (m) => want === '*ANY' || want === '*LAST' || want === '*FIRST' || want === '*NEXT' || (want === '*EXCP' ? ['*ESCAPE', '*NOTIFY'].includes(m.type) : m.type === want);
+        const cand = pgmq.filter(typeOk);
+        const m = want === '*LAST' || want === '*EXCP' ? cand[cand.length - 1] : cand[0];
+        const val = (x) => (m ? x : '');
+        if (cmd.params.MSG) setVar(cmd.params.MSG, val(m && m.text));
+        if (cmd.params.MSGLEN) setVar(cmd.params.MSGLEN, m ? m.text.length : 0);
+        if (cmd.params.MSGDTA) setVar(cmd.params.MSGDTA, val(m && m.data));
+        if (cmd.params.MSGDTALEN) setVar(cmd.params.MSGDTALEN, m ? String(m.data || '').length : 0);
+        if (cmd.params.MSGID) setVar(cmd.params.MSGID, val(m && m.id));
+        if (cmd.params.SEV) setVar(cmd.params.SEV, m ? m.sev : 0);
+        if (cmd.params.MSGF) setVar(cmd.params.MSGF, val(m && String(m.msgf || '').replace(/^.*\//, '')));
+        if (cmd.params.RTNTYPE) setVar(cmd.params.RTNTYPE, m ? ({ '*COMP': '01', '*DIAG': '02', '*INFO': '04', '*INQ': '05', '*ESCAPE': '15', '*NOTIFY': '14', '*STATUS': '12' }[m.type] || '04') : '  ');
+        if (cmd.params.KEYVAR) setVar(cmd.params.KEYVAR, m ? String(m.key).padStart(4, '0') : '');
+        if (m && rmv) pgmq.splice(pgmq.indexOf(m), 1);
+        return;
+      }
+      case 'RMVMSG': { pgmq.length = 0; return; }
       case 'RTVJOBA': {
         const map = {
           JOB: ctx.job.name, USER: ctx.job.user, NBR: ctx.job.number, CURUSER: ctx.job.user,
@@ -170,7 +234,11 @@ export async function runCl(ctx, pgmName, ir, refs) {
         cmd.positional.forEach((p) => parts.push(substitute(p)));
         for (const [kw, raw] of Object.entries(cmd.params)) parts.push(`${kw}(${substitute(raw)})`);
         const out = await runCommand(ctx, parts.join(' '), { noAutoPrompt: true });
-        for (const m of out) ctx.pgmMsgs.push(m);
+        for (const m of out) {
+          ctx.pgmMsgs.push(m);
+          // Los mensajes de terminación de los mandatos quedan en la cola del programa CL (RCVMSG)
+          if (m && (m.id || m.text)) qmsg({ id: m.id || '', type: m.sev >= 30 ? '*DIAG' : '*COMP', text: m.text || '', sev: m.sev || 0 });
+        }
       }
     }
   }
@@ -246,6 +314,7 @@ export async function runCl(ctx, pgmName, ir, refs) {
           const mon = node.monmsg.find((m) => matches(m, id)) || ir.monmsg.find((m) => matches(m, id));
           if (!mon) throw e;
           logJob(ctx.job, id, '*ESCAPE', e.message, { sev: 40, monitored: true });
+          qmsg({ id, type: '*ESCAPE', text: e.message, data: e.msgdta !== undefined ? e.msgdta : (e.args && e.args.length ? e.args.map((x) => String(x ?? '').padEnd(10)).join('') : ''), msgf: e.msgf || 'QCPFMSG', sev: e.sev || 40 });
           if (mon.body) return execList(mon.body);
           if (mon.exec) {
             const inner = parseCommand(mon.exec);

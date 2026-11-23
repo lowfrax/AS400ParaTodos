@@ -5,6 +5,16 @@ import {
   toDate, toTime, toTimestamp, fmtDate, addDuration, diffDates, dateToJs, editc, figValue,
 } from './types.js';
 
+import { runCycle, outputRecords, Printer, loadCtdata, zonedToNumber, zonedText, editWord } from './cycle.js';
+import { byteLen, encodeInto, decodeFrom, layout } from './bytes.js';
+import { toEbcdic, fromEbcdic } from '../ebcdic.js';
+
+// Disposición (desplazamientos) de una plantilla de DS, incluidas las anidadas
+function layoutDeep(tmpl, len) {
+  for (const f of tmpl) if (f.nested) layoutDeep(f.nested);
+  return layout(tmpl, { len: len || tmpl.$declLen });
+}
+
 export { RpgError };
 export class RpgCancel extends Error {
   constructor(msg = 'Request ended.') { super(msg); this.cancel = true; }
@@ -33,7 +43,9 @@ export class RpgProgram {
     this.globals = new Scope(null);
     this.ind = {};
     for (let i = 1; i <= 99; i++) this.ind[String(i).padStart(2, '0')] = '0';
-    for (const k of ['LR', 'RT', 'H1', 'U1', 'U2', ...FKEY_IND]) this.ind[k] = '0';
+    for (const k of ['LR', 'RT', 'MR', '1P', 'OF', 'OV', ...'ABCDEFG'.split('').map((x) => 'O' + x),
+      ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((i) => [`L${i}`, `H${i}`, `U${i}`]), ...FKEY_IND]) this.ind[k] = '0';
+    this.dtaMap = new Map();
     this.files = new Map();
     this.formats = new Map();
     this.cursors = new Map();
@@ -56,6 +68,11 @@ export class RpgProgram {
     g.vars.set('SQLERRD', { kind: 's', name: 'SQLERRD', type: { t: 'int', bits: 32 }, dim: 6, value: [0, 0, 0, 0, 0, 0] });
     for (const f of this.ir.files) await this.openFile(f, g);
     for (const d of this.ir.decls) await this.declare(d, g);
+    // Campos especiales de página de las O-specs
+    if ((this.ir.ospecs || []).length) {
+      for (const n of ['PAGE', 'PAGE1', 'PAGE2', 'PAGE3', 'PAGE4', 'PAGE5', 'PAGE6', 'PAGE7']) this.ensureVar(g, n, { t: 'zoned', digits: 4, dec: 0 });
+    }
+    loadCtdata(this);
     this.activated = true;
   }
 
@@ -66,7 +83,8 @@ export class RpgProgram {
       const desc = await this.host.describeFile(f.extfile || f.name);
       ent.desc = desc;
       ent.h = this.host.openDisk(desc, f);
-      for (const fld of desc.fields) this.ensureVar(scope, pfx(fld.name), fld.type);
+      const info = (this.ir.filex || {})[f.name];
+      if (!info || !info.progDesc) for (const fld of desc.fields) this.ensureVar(scope, pfx(fld.name), fld.type);
       const fmt = f.rename[desc.format] || desc.format;
       this.formats.set(fmt, ent);
       ent.formats = [fmt];
@@ -81,10 +99,112 @@ export class RpgProgram {
       ent.sfl = {};
       for (const [fmtName, rrnVar] of Object.entries(f.sfile)) ent.sfl[fmtName] = { rrnVar, records: [] };
     } else if (f.device === 'PRINTER') {
-      ent.h = this.host.openPrinter(f.name, f.prtlen || 132);
+      const info = (this.ir.filex || {})[f.name] || {};
+      const pd = f.prtExt && this.host.describePrinter ? await this.host.describePrinter(f.extfile || f.name) : null;
+      const width = pd ? (pd.pagesize || [66, 132])[1] : f.prtlen || 132;
+      ent.prtInfo = {
+        formlen: f.formlen || info.formlen || (pd ? (pd.pagesize || [66])[0] : 66), ofl: f.formofl || info.formofl || (pd ? pd.ovrflw : 60) || 60,
+        width, ind: (f.oflind || info.ofl || '').toUpperCase(),
+      };
+      ent.h = this.host.openPrinter(f.name, width, { pageLen: ent.prtInfo.formlen });
       ent.formats = [f.name];
+      if (pd) {
+        ent.pfmt = pd;
+        ent.formats = Object.keys(pd.formats);
+        for (const [fmtName, fmt] of Object.entries(pd.formats)) {
+          this.formats.set(f.rename[fmtName] || fmtName, ent);
+          for (const it of fmt.items) if (it.name) this.ensureVar(scope, pfx(it.name), it.rpgType);
+        }
+      }
     }
     this.files.set(f.name, ent);
+  }
+
+  // WRITE de un formato de un archivo de impresora descrito externamente (DDS de PRTF)
+  async writePrtf(ent, s, sc) {
+    const fmtName = Object.keys(ent.pfmt.formats).find((n) => n === s.file || ent.def.rename[n] === s.file) || s.file;
+    const fmt = ent.pfmt.formats[fmtName];
+    if (!fmt) throw new RpgError('01211', 'RNX1211', `Record format ${s.file} is not defined in printer file ${ent.def.name}.`);
+    const prt = this.printerFor(ent);
+    const on = (cond) => (cond || []).every((c) => (this.ind[c.ind] === '1') !== c.not);
+    const pfx = ent.def.prefix || '';
+    const ctlOf = (list, kw) => (list || []).filter((c) => c.kw === kw && on(c.cond)).map((c) => c.n)[0];
+    const ec = editc;
+    const textOf = async (it) => {
+      if (!it.name) {
+        if (it.special === 'DATE') { const d = new Date(); return ec(Number(`${d.getMonth() + 1}`.padStart(2, '0') + `${d.getDate()}`.padStart(2, '0') + `${d.getFullYear() % 100}`.padStart(2, '0')), 'Y', { t: 'zoned', digits: 6, dec: 0 }); }
+        if (it.special === 'TIME') { const d = new Date(); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, '0')).join(':'); }
+        if (it.special === 'PAGNBR') { const n = prt.pages + 1; return it.edtcde ? ec(n, it.edtcde, { t: 'zoned', digits: 4, dec: 0 }) : String(n).padStart(4, '0'); }
+        return it.text || '';
+      }
+      const v = sc.lookup(pfx + it.name);
+      const val = v ? v.value : blank(it.rpgType);
+      if (isNumType(it.rpgType)) {
+        const n = toNumber(val);
+        if (it.edtwrd) return editWord(n, it.edtwrd, it.dec || 0);
+        if (it.edtcde) return ec(n, it.edtcde, it.rpgType);
+        const dig = it.len;
+        const s2 = String(Math.round(Math.abs(n) * 10 ** (it.dec || 0))).padStart(dig, '0').slice(-dig);
+        return n < 0 ? s2.slice(0, -1) + '}JKLMNOPQR'[Number(s2.slice(-1))] : s2;
+      }
+      return toStr(val).padEnd(it.len || 0).slice(0, it.len || undefined);
+    };
+    // Control de impresión del formato: saltos y espacios antes
+    const skipB = ctlOf(fmt.ctl, 'SKIPB');
+    const spaceB = ctlOf(fmt.ctl, 'SPACEB');
+    if (skipB) prt.skipTo(skipB);
+    if (spaceB) prt.space(spaceB);
+    let buf = '';
+    let lastEnd = 0;
+    let curLine = null;
+    const flush = () => { if (buf) prt.print(buf); buf = ''; lastEnd = 0; };
+    for (const it of fmt.items) {
+      if (!on(it.cond)) continue;
+      if (it.line && it.line !== curLine) {
+        // Posición de línea absoluta en la página
+        flush();
+        prt.skipTo(it.line);
+        curLine = it.line;
+      }
+      const fs = ctlOf(it.ctl, 'SKIPB');
+      const fsp = ctlOf(it.ctl, 'SPACEB');
+      if (fs || fsp) { flush(); if (fs) prt.skipTo(fs); if (fsp) prt.space(fsp); }
+      const text = await textOf(it);
+      const start = it.pos && it.pos.abs ? it.pos.abs : lastEnd + 1 + ((it.pos && it.pos.rel) || 0);
+      if (buf.length < start - 1) buf = buf.padEnd(start - 1);
+      buf = buf.slice(0, start - 1) + text + buf.slice(start - 1 + text.length);
+      lastEnd = start - 1 + text.length;
+      const fsa = ctlOf(it.ctl, 'SPACEA');
+      const fka = ctlOf(it.ctl, 'SKIPA');
+      if (fsa !== undefined || fka) { flush(); if (fsa) prt.space(fsa); if (fka) prt.skipTo(fka); }
+    }
+    flush();
+    const spaceA = ctlOf(fmt.ctl, 'SPACEA');
+    const skipA = ctlOf(fmt.ctl, 'SKIPA');
+    if (skipA) prt.skipTo(skipA);
+    if (spaceA !== undefined) prt.space(spaceA);
+    else if (!skipA && !skipB && !spaceB && !fmt.items.some((i) => i.line)) prt.space(1);
+    return null;
+  }
+
+  // Impresora paginada (una por archivo PRINTER abierto)
+  printerFor(ent) {
+    if (!ent.prt) {
+      const pi = ent.prtInfo || {};
+      ent.prt = new Printer(ent.h, { formlen: pi.formlen, ofl: pi.ofl, width: pi.width, onOverflow: () => { if (pi.ind) this.ind[pi.ind] = '1'; } });
+    }
+    return ent.prt;
+  }
+
+  overflowInds() {
+    const out = [];
+    for (const ent of this.files.values()) if (ent.prtInfo && ent.prtInfo.ind && !out.includes(ent.prtInfo.ind)) out.push(ent.prtInfo.ind);
+    return out;
+  }
+
+  get isCycle() {
+    const ir = this.ir;
+    return Object.values(ir.filex || {}).some((x) => x.desig === 'P' || x.desig === 'S') || (ir.ospecs || []).length > 0 || (ir.totals || []).length > 0 || (ir.ispecs || []).length > 0;
   }
 
   ensureVar(scope, name, type) {
@@ -116,7 +236,7 @@ export class RpgProgram {
     return out;
   }
 
-  dsLen(tmpl) { return tmpl.reduce((a, f) => a + (f.nested ? this.dsLen(f.nested) : charLen(f.type)) * (f.dim || 1), 0); }
+  dsLen(tmpl) { return layoutDeep(tmpl); }
 
   async buildTemplate(d, scope) {
     if (d.likeds) {
@@ -139,33 +259,67 @@ export class RpgProgram {
       if (f.likeds) {
         const src = scope.lookup(f.likeds);
         if (!src || src.kind !== 'ds') throw new RpgError('00202', 'RNF7030', `Data structure ${f.likeds} is not defined.`);
-        tmpl.push({ name: f.name, nested: clone(src.tmpl), dim: f.dim ? this.constNumber(f.dim) : 0 });
+        tmpl.push({ name: f.name, nested: clone(src.tmpl), dim: f.dim ? this.constNumber(f.dim) : 0, pos: f.pos, overlay: f.overlay });
       } else {
         const type = this.resolveType(f.type, scope);
         let inz = null;
         if (f.inz) inz = coerce(type, await this.ev(f.inz, scope));
-        tmpl.push({ name: f.name, type, dim: f.dim ? this.constNumber(f.dim) : 0, inz });
+        tmpl.push({ name: f.name, type, dim: f.dim ? this.constNumber(f.dim) : 0, inz, pos: f.pos, overlay: f.overlay });
       }
     }
     return tmpl;
   }
 
-  makeInst(tmpl) {
+  /**
+   * Instancia de DS sobre un buffer de bytes con la representación de IBM i: los subcampos (con POS/OVERLAY o
+   * consecutivos) son vistas sobre ese buffer, de modo que se solapan como en un AS400 real.
+   * Sin INZ la DS empieza en blancos (X'40'): leer un numérico sin inicializar da error de datos decimales.
+   */
+  makeInst(tmpl, { buf, base: base0 = 0, inzAll = false, occ = null } = {}) {
+    const total = layoutDeep(tmpl);
+    if (!buf) buf = Buffer.alloc(total * (occ ? occ.n : 1), 0x40);
+    // DS de múltiples apariciones (OCCURS): un buffer de n × longitud; los subcampos ven la aparición actual
+    const B = occ ? () => base0 + occ.cur * total : () => base0;
     const fields = new Map();
     for (const f of tmpl) {
       if (f.nested) {
         const sub = { kind: 'ds', name: f.name, qualified: true, tmpl: f.nested, dim: f.dim };
-        sub.inst = f.dim ? Array.from({ length: f.dim }, () => this.makeInst(f.nested)) : this.makeInst(f.nested);
+        const at = (i) => this.makeInst(f.nested, { buf, base: base0 + f.$off + i * f.$stride, inzAll, occ: occ && { get cur() { return occ.cur; }, n: occ.n, len: total } });
+        sub.inst = f.dim ? Array.from({ length: f.dim }, (_, i) => at(i)) : at(0);
         fields.set(f.name, sub);
+        continue;
+      }
+      const init = f.inz !== null && f.inz !== undefined ? f.inz : undefined;
+      if (f.type.t === 'pointer' || f.type.t === 'like' || !byteLen(f.type)) {
+        const v0 = init !== undefined ? init : blank(f.type);
+        fields.set(f.name, { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: v0, value: f.dim ? Array.from({ length: f.dim }, () => v0) : v0 });
+        continue;
+      }
+      const fv = { kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: init, ds: { buf, get off() { return B() + f.$off; }, stride: f.$stride } };
+      const t = f.type;
+      const offOf = (i) => B() + f.$off + i * f.$stride;
+      if (f.dim) {
+        const n = f.dim;
+        Object.defineProperty(fv, 'value', {
+          enumerable: true,
+          get() {
+            const arr = Array.from({ length: n }, (_, i) => decodeFrom(buf, offOf(i), t, f.name));
+            return new Proxy(arr, { set(target, k, val) { target[k] = val; if (/^\d+$/.test(String(k))) encodeInto(buf, offOf(Number(k)), t, val); return true; } });
+          },
+          set(vals) { for (let i = 0; i < n; i++) encodeInto(buf, offOf(i), t, Array.isArray(vals) ? vals[i] : vals); },
+        });
       } else {
-        const init = f.inz !== null && f.inz !== undefined ? f.inz : blank(f.type);
-        fields.set(f.name, {
-          kind: 's', name: f.name, type: f.type, dim: f.dim, inzValue: init,
-          value: f.dim ? Array.from({ length: f.dim }, () => init) : init,
+        Object.defineProperty(fv, 'value', {
+          enumerable: true,
+          get() { return decodeFrom(buf, offOf(0), t, f.name); },
+          set(val) { encodeInto(buf, offOf(0), t, val); },
         });
       }
+      if (init !== undefined) fv.value = f.dim ? Array.from({ length: f.dim }, () => init) : init;
+      else if (inzAll) fv.value = f.dim ? Array.from({ length: f.dim }, () => blank(t)) : blank(t);
+      fields.set(f.name, fv);
     }
-    return { fields };
+    return { fields, buf, get base() { return B(); }, len: total, occ };
   }
 
   async declare(d, scope) {
@@ -190,9 +344,18 @@ export class RpgProgram {
     }
     if (d.kind === 'ds') {
       const tmpl = await this.buildTemplate(d, scope);
+      if (d.len) tmpl.$declLen = this.constNumber(d.len);
       const dim = d.dim ? this.constNumber(d.dim) : 0;
       const v = { kind: 'ds', name: d.name, qualified: !!d.qualified || !!dim, tmpl, dim, template: d.template };
-      v.inst = dim ? Array.from({ length: dim }, () => this.makeInst(tmpl)) : this.makeInst(tmpl);
+      const inzAll = !!d.inz;
+      const occurs = d.occurs ? this.constNumber(d.occurs) : 0;
+      if (occurs > 1 && !dim) {
+        // OCCURS(n): la inicialización (INZ) se hace en la 1.ª aparición y se copia a las demás
+        v.occ = { cur: 0, n: occurs };
+        v.inst = this.makeInst(tmpl, { inzAll, occ: v.occ });
+        const len = v.inst.len;
+        for (let i = 1; i < occurs; i++) v.inst.buf.copy(v.inst.buf, i * len, 0, len);
+      } else v.inst = dim ? Array.from({ length: dim }, () => this.makeInst(tmpl, { inzAll })) : this.makeInst(tmpl, { inzAll });
       if (d.name !== '*N') scope.vars.set(d.name, v);
       if (!v.qualified) for (const [n, f] of v.inst.fields) scope.vars.set(n, f);
     }
@@ -233,8 +396,10 @@ export class RpgProgram {
           this.inzDone = true;
           await this.execList(this.ir.subrs['*INZSR'], this.globals, fr);
         }
-        for (;;) {
+        if (this.isCycle) await runCycle(this, fr);
+        else for (;;) {
           const sig = await this.execList(this.ir.main, this.globals, fr);
+          if (sig && sig.s === 'goto') throw new RpgError('00202', 'RNX9999', `TAG ${sig.label} not found for GOTO.`);
           if (sig && sig.s === 'return') break;
           if (this.ind.LR === '1') break;
           // Ciclo RPG: sin *INLR ni RETURN, los cálculos se repiten.
@@ -252,6 +417,8 @@ export class RpgProgram {
     } finally {
       for (const [v, ref] of bound) ref.set(v.value);
     }
+    // La salida impresa de esta llamada se cierra (página parcial incluida) antes de volver
+    for (const ent of this.files.values()) if (ent.prt) { ent.prt.close(); ent.prt = null; }
     if (this.ind.LR === '1') await this.closeAll();
     return { lr: this.ind.LR === '1' };
   }
@@ -269,9 +436,16 @@ export class RpgProgram {
   }
 
   async execList(stmts, sc, fr) {
-    for (const s of stmts) {
-      const sig = await this.exec(s, sc, fr);
-      if (sig) return sig;
+    for (let i = 0; i < stmts.length; i++) {
+      const sig = await this.exec(stmts[i], sc, fr);
+      if (sig) {
+        // GOTO: se busca el TAG en esta lista; si no está, la señal sube a la lista que la contiene
+        if (sig.s === 'goto') {
+          const j = stmts.findIndex((x) => x.op === 'tag' && x.label === sig.label);
+          if (j >= 0) { i = j; await this.tick(); continue; }
+        }
+        return sig;
+      }
     }
     return null;
   }
@@ -280,7 +454,28 @@ export class RpgProgram {
     this.line = s.line;
     await this.tick();
     switch (s.op) {
-      case 'nop': return null;
+      case 'nop': case 'tag': return null;
+      case 'goto': return { s: 'goto', label: s.label };
+      case 'except': await outputRecords(this, ['E'], s.name || ''); return null;
+      case 'movea': return this.moveA(s, sc);
+      case 'dtadef': this.dtaMap.set(s.name, s.ext); return null;
+      case 'dtain': case 'dtaout': return this.dtaIO(s, sc);
+      case 'test': {
+        const ref = await this.place(s.target, sc);
+        const v = ref.get();
+        const kind = String(s.ext || '').toUpperCase().includes('T') ? 'time' : String(s.ext || '').toUpperCase().includes('Z') ? 'timestamp' : 'date';
+        const fmt = toStr(await this.ev(s.fmt, sc)).trim() || undefined;
+        if (kind === 'date') toDate(v, fmt); else if (kind === 'time') toTime(v, fmt); else toTimestamp(v);
+        return null;
+      }
+      case 'bit': {
+        const ref = await this.place(s.target, sc);
+        const cur = toStr(ref.get());
+        let code = cur.charCodeAt(0) || 0x40;
+        for (const ch of String(s.bits)) { if (!/[0-7]/.test(ch)) continue; const mask = 0x80 >> Number(ch); code = s.on ? code | mask : code & ~mask; }
+        ref.set(String.fromCharCode(code) + cur.slice(1));
+        return null;
+      }
       case 'assign': return this.assign(s, sc);
       case 'callp': {
         if (s.e) return this.withE(() => this.ev(s.call, sc, { stmt: true }));
@@ -358,8 +553,18 @@ export class RpgProgram {
           throw e;
         }
       }
+      case 'commit': case 'rolbk': {
+        const r = this.host.sqlControl ? await this.host.sqlControl(s.op === 'commit' ? 'COMMIT' : 'ROLLBACK', {}) : null;
+        this.last.error = !!(r && r.error);
+        if (r && r.error && !(s.ext || '').includes('E')) throw new RpgError('00802', 'RNX0802', `Commitment control error: ${r.error}`);
+        return null;
+      }
       case 'dsply': {
-        const text = s.msg ? toStr(await this.ev(s.msg, sc)) : '';
+        let text = '';
+        if (s.msg) {
+          const { v, t } = await this.typed(s.msg, sc);
+          text = t && (t.t === 'packed' || t.t === 'zoned') && typeof v === 'number' ? numToChar(v, t.dec || 0) : toStr(v);
+        }
         if (s.resp) {
           const ref = await this.place(s.resp, sc);
           const reply = await this.host.dsply(text, true, ref.type ? charLen(ref.type) : 52);
@@ -383,23 +588,36 @@ export class RpgProgram {
       }
       case 'move': {
         const ref = await this.place(s.target, sc);
-        const src = await this.ev(s.src, sc);
-        if (ref.type && isCharType(ref.type)) {
-          const cur = toStr(ref.get());
-          const sv = toStr(src);
-          const len = cur.length;
-          let res;
-          if (s.left) res = sv.length >= len ? sv.slice(0, len) : sv + cur.slice(sv.length);
-          else res = sv.length >= len ? sv.slice(sv.length - len) : cur.slice(0, len - sv.length) + sv;
-          ref.set(res);
-        } else ref.set(typeof src === 'string' ? toNumber(src.trim() || 0) : src);
+        const { v: src, t: st } = await this.typed(s.src, sc);
+        const tt = ref.type || { t: 'char', len: toStr(ref.get()).length };
+        if (tt.t === 'date' || tt.t === 'time' || tt.t === 'timestamp') { ref.set(coerce(tt, typeof src === 'number' ? String(src) : toStr(src))); return null; }
+        // Representación en caracteres de origen y destino (los numéricos como dígitos con zona de signo)
+        const srcText = isFig(src) ? null : (st && isNumType(st)) || typeof src === 'number' ? zonedText(src, st && isNumType(st) ? st : { t: 'zoned', digits: String(Math.trunc(Math.abs(toNumber(src)))).length + 0, dec: 0 }) : toStr(src);
+        if (srcText === null) { ref.set(src); return null; }
+        const tgtNum = isNumType(tt);
+        const len = tgtNum ? (tt.digits || charLen(tt)) : charLen(tt) || toStr(ref.get()).length;
+        const cur = tgtNum ? zonedText(ref.get(), tt) : toStr(ref.get()).padEnd(len).slice(0, len);
+        const padCh = tgtNum ? '0' : ' ';
+        let res;
+        if (s.left) {
+          if (srcText.length >= len) res = srcText.slice(0, len);
+          else res = srcText + (s.pad ? padCh.repeat(len - srcText.length) : cur.slice(srcText.length));
+        } else if (srcText.length >= len) res = srcText.slice(srcText.length - len);
+        else res = (s.pad ? padCh.repeat(len - srcText.length) : cur.slice(0, len - srcText.length)) + srcText;
+        if (tgtNum) {
+          // MOVEL a numérico: el signo lo da el origen si es numérico
+          let n = zonedToNumber(res, tt.dec || 0);
+          if (s.left && st && isNumType(st)) n = Math.abs(n) * (toNumber(src) < 0 ? -1 : 1);
+          ref.set(n);
+        } else ref.set(tt.t === 'varchar' ? res.replace(/\s+$/, '') : res);
         return null;
       }
       case 'callpgm': {
         const name = toStr(await this.ev(s.pgm, sc)).trim().toUpperCase();
         const refs = [];
         for (const p of s.parms) refs.push(await this.place(p, sc));
-        await this.host.callProgram(name, refs);
+        const r = await this.host.callProgram(name, refs);
+        this.lastCallLR = !!(r && r.lr);
         return null;
       }
       case 'file': return this.fileOp(s, sc);
@@ -433,6 +651,11 @@ export class RpgProgram {
       }
       return null;
     }
+    // %OCCUR(ds1) = ds2 (OCCUR con otra DS en el factor 1): toma la aparición actual de ds2
+    if (s.target.k === 'bif' && s.target.name === '%OCCUR' && s.mode === '=' && s.expr.k === 'id') {
+      const src = sc.lookup(s.expr.name);
+      if (src && src.kind === 'ds' && src.occ) { const v = this.occDs(s.target.args[0], sc); v.occ.cur = this.occIndex(v, 0, sc, src); return null; }
+    }
     const ref = await this.place(s.target, sc);
     let v = await this.ev(s.expr, sc);
     if (s.mode !== '=') v = arith(s.mode.slice(0, -1), ref.get(), v);
@@ -449,12 +672,14 @@ export class RpgProgram {
       var: v,
       get() {
         if (idx === undefined || idx === null) return v.value;
+        if (v.ds) return decodeFrom(v.ds.buf, v.ds.off + self.checkIdx(v, idx) * v.ds.stride, v.type, v.name);
         return v.value[self.checkIdx(v, idx)];
       },
       set(val, o) {
-        if (Array.isArray(v.value) && (idx === undefined || idx === null)) {
+        if (v.ds && idx !== undefined && idx !== null) { encodeInto(v.ds.buf, v.ds.off + self.checkIdx(v, idx) * v.ds.stride, v.type, coerce(v.type, val, o)); return; }
+        if (v.dim && (idx === undefined || idx === null)) {
           if (Array.isArray(val)) v.value = val.map((x) => coerce(v.type, x, o));
-          else v.value = v.value.map(() => coerce(v.type, val, o));
+          else { const cv = coerce(v.type, val, o); v.value = Array.from({ length: v.dim }, () => cv); }
           return;
         }
         if (idx === undefined || idx === null) v.value = coerce(v.type, val, o);
@@ -462,8 +687,9 @@ export class RpgProgram {
       },
       clear(reset) {
         const val = reset ? v.inzValue ?? blank(v.type) : blank(v.type);
-        if (Array.isArray(v.value) && (idx === undefined || idx === null)) v.value = v.value.map(() => val);
+        if (v.dim && (idx === undefined || idx === null)) v.value = Array.from({ length: v.dim }, () => val);
         else if (idx === undefined || idx === null) v.value = val;
+        else if (v.ds) encodeInto(v.ds.buf, v.ds.off + self.checkIdx(v, idx) * v.ds.stride, v.type, val);
         else v.value[self.checkIdx(v, idx)] = val;
       },
     };
@@ -471,7 +697,7 @@ export class RpgProgram {
 
   checkIdx(v, idx) {
     const i = Math.trunc(toNumber(idx));
-    const n = Array.isArray(v.value) ? v.value.length : Array.isArray(v.inst) ? v.inst.length : 0;
+    const n = v.dim ? v.dim : Array.isArray(v.inst) ? v.inst.length : Array.isArray(v.value) ? v.value.length : 0;
     if (i < 1 || i > n) throw new RpgError('00121', 'RNX0121', `An array index is out of range (${i}).`);
     return i - 1;
   }
@@ -493,6 +719,7 @@ export class RpgProgram {
   }
 
   dsString(inst, tmpl) {
+    if (inst.buf) return fromEbcdic(inst.buf, 37, inst.base, inst.base + inst.len);
     let s = '';
     for (const f of tmpl) {
       const fv = inst.fields.get(f.name);
@@ -508,6 +735,12 @@ export class RpgProgram {
   }
 
   splitInto(inst, tmpl, str) {
+    if (inst.buf) {
+      // Asignar a la DS completa: los bytes del valor (EBCDIC) rellenos con blancos
+      const s = String(str).padEnd(inst.len).slice(0, inst.len);
+      toEbcdic(s).copy(inst.buf, inst.base);
+      return;
+    }
     let pos = 0;
     for (const f of tmpl) {
       const fv = inst.fields.get(f.name);
@@ -538,17 +771,33 @@ export class RpgProgram {
         continue;
       }
       const val = fig ? figValue(fv.type, fig) : reset ? fv.inzValue ?? blank(fv.type) : blank(fv.type);
-      fv.value = Array.isArray(fv.value) ? fv.value.map(() => val) : val;
+      fv.value = fv.dim ? Array.from({ length: fv.dim }, () => val) : val;
     }
   }
 
   copyInst(src, dst) {
+    // DS = DS: copia de bytes cuando ambas tienen la misma longitud (como el MOVE de IBM i)
+    if (src.buf && dst.buf && src.len === dst.len) { src.buf.copy(dst.buf, dst.base, src.base, src.base + src.len); return; }
     for (const [n, f] of src.fields) {
       const t = dst.fields.get(n);
       if (!t) continue;
       if (f.kind === 'ds') { this.copyInst(Array.isArray(f.inst) ? f.inst[0] : f.inst, Array.isArray(t.inst) ? t.inst[0] : t.inst); continue; }
       t.value = Array.isArray(f.value) ? [...f.value] : f.value;
     }
+  }
+
+  /** DS de múltiples apariciones nombrada en %OCCUR / OCCUR. */
+  occDs(e, sc) {
+    const v = e && e.k === 'id' ? sc.lookup(e.name) : null;
+    if (!v || v.kind !== 'ds' || !v.occ) throw new RpgError('00202', 'RNF7030', `${e && e.name ? e.name : 'Operand'} is not a multiple-occurrence data structure.`);
+    return v;
+  }
+
+  /** Aparición pedida (1..n): un número, o la aparición actual de otra DS de múltiples apariciones. */
+  occIndex(v, val, sc, src) {
+    const n = src && src.occ ? src.occ.cur + 1 : Math.trunc(toNumber(val));
+    if (n < 1 || n > v.occ.n) throw new RpgError('00122', 'RNX0122', `Occurrence value ${n} is outside the range of multiple-occurrence data structure ${v.name} (1-${v.occ.n}).`);
+    return n - 1;
   }
 
   async place(e, sc) {
@@ -610,6 +859,16 @@ export class RpgProgram {
         return this.place({ k: 'sp', v: '*IN' + String(n).padStart(2, '0') }, sc);
       }
       case 'bif': {
+        if (e.name === '%OCCUR') {
+          const v = this.occDs(e.args[0], sc);
+          const self = this;
+          return {
+            type: { t: 'int', bits: 32 },
+            get: () => v.occ.cur + 1,
+            set: (val) => { v.occ.cur = self.occIndex(v, val, sc); },
+            clear: () => { v.occ.cur = 0; },
+          };
+        }
         if (e.name === '%SUBST') {
           const base = await this.place(e.args[0], sc);
           const start = Math.trunc(toNumber(await this.ev(e.args[1], sc)));
@@ -655,9 +914,11 @@ export class RpgProgram {
         if (e.name === 'UYEAR') return t.getFullYear() % 100;
         if (e.name === 'UMONTH') return t.getMonth() + 1;
         if (e.name === 'UDAY') return t.getDate();
+        if (e.name === '$CALLLR$') return this.lastCallLR ? '1' : '0';
         throw new RpgError('00202', 'RNF7030', `The name or indicator ${e.name} is not defined.`);
       }
       case 'call': {
+        if (/^\$[A-Z]+\$$/.test(e.name)) return this.internal(e, sc);
         const v = sc.lookup(e.name);
         if (v && (v.kind === 's' || v.kind === 'ds') && (v.dim || Array.isArray(v.inst))) {
           const p = await this.place(e, sc);
@@ -688,6 +949,109 @@ export class RpgProgram {
         }
       }
       default: throw new RpgError('00202', 'RNX9999', `Expression kind ${e.k} not supported.`);
+    }
+  }
+
+  // Funciones auxiliares generadas por el conversor de columnas fijas
+  async internal(e, sc) {
+    const a = e.args;
+    switch (e.name) {
+      case '$NUM$': { const { v, t } = await this.typed(a[0], sc); return t && isNumType(t) ? toNumber(v) : zonedToNumber(toStr(v), 0); }
+      case '$ZB$': { const { v, t } = await this.typed(a[0], sc); return t && isNumType(t) ? toNumber(v) === 0 : !toStr(v).trim(); }
+      case '$TIME$': {
+        const len = Math.trunc(toNumber(await this.ev(a[0], sc)));
+        const d = new Date();
+        const hms = Number(`${d.getHours()}`.padStart(2, '0') + `${d.getMinutes()}`.padStart(2, '0') + `${d.getSeconds()}`.padStart(2, '0'));
+        const mdy = Number(`${d.getMonth() + 1}`.padStart(2, '0') + `${d.getDate()}`.padStart(2, '0') + `${d.getFullYear()}`);
+        return len >= 12 ? Number(`${hms}`.padStart(6, '0') + `${mdy}`.padStart(len >= 14 ? 8 : 6, '0').slice(len >= 14 ? 0 : 2)) : hms;
+      }
+      case '$TESTN$': {
+        const v = toStr(await this.ev(a[0], sc));
+        if (/^\d+$/.test(v)) return 1;
+        if (/^ +\d+$/.test(v)) return 2;
+        return 0;
+      }
+      case '$TESTB$': {
+        const bits = toStr(await this.ev(a[0], sc));
+        const code = toStr(await this.ev(a[1], sc)).charCodeAt(0) || 0;
+        const sel = [...bits].filter((c) => /[0-7]/.test(c)).map((c) => (code & (0x80 >> Number(c))) !== 0);
+        if (sel.every((x) => !x)) return 0;
+        if (sel.every((x) => x)) return 2;
+        return 1;
+      }
+      default: throw new RpgError('00202', 'RNX9999', `Internal function ${e.name} not supported.`);
+    }
+  }
+
+  // MOVEA: mueve bytes entre arrays y campos de forma contigua
+  async moveA(s, sc) {
+    const flat = (v, t) => (Array.isArray(v) ? v.map((x) => (t && isNumType(t) ? zonedText(x, t) : toStr(x).padEnd(charLen(t || { t: 'char', len: 1 })).slice(0, charLen(t || { t: 'char', len: 1 })))).join('') : (t && isNumType(t) ? zonedText(v, t) : toStr(v)));
+    let src;
+    if (s.src.k === 'all') src = { all: s.src.v };
+    else { const { v, t } = await this.typed(s.src, sc); src = isFig(v) ? v : flat(v, t); }
+    let tgt = s.target;
+    let start = 1;
+    if (tgt.k === 'call' && tgt.args && tgt.args.length === 1) {
+      const base = sc.lookup(tgt.name);
+      if (base && base.dim) { start = Math.trunc(toNumber(await this.ev(tgt.args[0], sc))); tgt = { k: 'id', name: tgt.name }; }
+    }
+    const ref = await this.place(tgt, sc);
+    const v = ref.var && ref.var.dim ? ref.var : null;
+    if (v) {
+      const el = isNumType(v.type) ? v.type.digits : charLen(v.type);
+      const arr = v.value.slice();
+      const totalLen = (arr.length - start + 1) * el;
+      let text = isFig(src) ? null : typeof src === 'object' && src.all !== undefined ? String(src.all).repeat(Math.ceil(totalLen / Math.max(1, String(src.all).length))).slice(0, totalLen) : src;
+      if (text === null) { for (let i = start - 1; i < arr.length; i++) arr[i] = coerce(v.type, src); v.value = arr; return null; }
+      let pos = 0;
+      for (let i = start - 1; i < arr.length && (pos < text.length || s.pad); i++) {
+        const curText = isNumType(v.type) ? zonedText(arr[i], v.type) : toStr(arr[i]).padEnd(el).slice(0, el);
+        let piece = text.slice(pos, pos + el);
+        if (piece.length < el) piece = piece + (s.pad ? (isNumType(v.type) ? '0' : ' ').repeat(el - piece.length) : curText.slice(piece.length));
+        arr[i] = isNumType(v.type) ? coerce(v.type, zonedToNumber(piece, v.type.dec || 0)) : coerce(v.type, piece);
+        pos += el;
+      }
+      v.value = arr;
+      return null;
+    }
+    // Destino campo: se rellena desde la izquierda
+    const tt = ref.type || { t: 'char', len: toStr(ref.get()).length };
+    const len = isNumType(tt) ? tt.digits : charLen(tt);
+    const cur = isNumType(tt) ? zonedText(ref.get(), tt) : toStr(ref.get()).padEnd(len).slice(0, len);
+    let text = typeof src === 'object' && src && src.all !== undefined ? String(src.all).repeat(len).slice(0, len) : isFig(src) ? null : String(src);
+    if (text === null) { ref.set(src); return null; }
+    text = text.length >= len ? text.slice(0, len) : text + (s.pad ? (isNumType(tt) ? '0' : ' ').repeat(len - text.length) : cur.slice(text.length));
+    ref.set(isNumType(tt) ? zonedToNumber(text, tt.dec || 0) : text);
+    return null;
+  }
+
+  // IN / OUT de áreas de datos (DEFINE *DTAARA, *LDA, DTAARA(*AUTO))
+  async dtaIO(s, sc) {
+    if (!this.host.dtaara) throw new RpgError('00401', 'RNX0401', 'Data areas are not available in this environment.');
+    const names = s.target === '*DTAARA' ? [...this.dtaMap.keys()] : [s.target];
+    for (const n of names) {
+      const ext = n === '*LDA' ? '*LDA' : this.dtaMap.get(n) || n;
+      const v = sc.lookup(n === '*LDA' ? (this.dtaMap.get('*LDA') || '*LDA') : n);
+      if (s.op === 'dtain') {
+        const val = await this.host.dtaara(ext);
+        if (v && v.kind === 's') v.value = coerce(v.type, isNumType(v.type) ? toNumber(val || 0) : String(val ?? ''));
+        else if (v && v.kind === 'ds') this.dsAssign(v, String(val ?? ''));
+      } else {
+        const val = v ? (v.kind === 'ds' ? this.dsString(v.inst, v.tmpl) : v.value) : '';
+        await this.host.dtaara(ext, isNumType(v?.type || {}) ? toNumber(val) : toStr(val));
+      }
+    }
+    return null;
+  }
+
+  dsAssign(v, text) {
+    let pos = 0;
+    for (const [, f] of v.inst.fields) {
+      if (f.kind !== 's') continue;
+      const L = isNumType(f.type) ? (f.type.digits || charLen(f.type)) : charLen(f.type);
+      const piece = text.padEnd(pos + L).slice(pos, pos + L);
+      f.value = isNumType(f.type) ? coerce(f.type, zonedToNumber(piece, f.type.dec || 0)) : coerce(f.type, piece);
+      pos += L;
     }
   }
 
@@ -729,13 +1093,39 @@ export class RpgProgram {
         await this.host.callProgram(pr.extpgm.toUpperCase(), refs);
         return undefined;
       }
+      // Procedimiento de otro módulo o de un programa de servicio enlazado
+      if (this.host.resolveBound) {
+        const t = await this.host.resolveBound(pr.extproc || name, this);
+        if (t) {
+          const r = await t.prog.callProc(t.proc, args, sc, this);
+          return r === undefined || !pr.returns ? r : coerce(this.resolveType(pr.returns, this.globals), r);
+        }
+      }
       // Procedimiento externo de sistema conocido
-      if (this.host.callProc) return this.host.callProc(pr.extproc || name, await Promise.all(args.map((a) => this.ev(a, sc))));
+      if (this.host.callProc) {
+        const vals = [];
+        const places = [];
+        for (let i = 0; i < args.length; i++) {
+          const p = pr.params[i];
+          const byRef = p && !p.value && !p.const && ['id', 'dot', 'idx', 'call'].includes(args[i].k);
+          const pl = byRef ? await this.place(args[i], sc).catch(() => null) : null;
+          places.push(pl);
+          vals.push(pl ? pl.get() : await this.ev(args[i], sc));
+        }
+        const r = await this.host.callProc(pr.extproc || name, vals, places, pr);
+        return r === undefined || !pr.returns ? r : coerce(this.resolveType(pr.returns, this.globals), r);
+      }
+    }
+    // Sin prototipo: procedimiento exportado por un módulo o programa de servicio enlazado
+    if (this.host.resolveBound) {
+      const t = await this.host.resolveBound(name, this);
+      if (t) return t.prog.callProc(t.proc, args, sc, this);
     }
     throw new RpgError('00211', 'RNX0211', `Program or procedure ${name} is not defined.`);
   }
 
-  async callProc(proc, args, sc) {
+  // caller: programa (módulo) que hace la llamada; los argumentos se evalúan en su contexto
+  async callProc(proc, args, sc, caller = this) {
     const local = new Scope(this.globals);
     const back = [];
     for (let i = 0; i < proc.params.length; i++) {
@@ -746,7 +1136,7 @@ export class RpgProgram {
         continue;
       }
       if (!type) {
-        const src = await this.place(args[i], sc);
+        const src = await caller.place(args[i], sc);
         const tmpl = (this.globals.lookup(p.type.name) || {}).tmpl || (src.dsvar && src.dsvar.tmpl) || [];
         const v = { kind: 'ds', name: p.name, qualified: true, tmpl, inst: this.makeInst(tmpl) };
         if (src.inst) this.copyInst(src.inst, v.inst);
@@ -756,14 +1146,14 @@ export class RpgProgram {
       }
       const dim = p.dim ? this.constNumber(p.dim) : 0;
       if (!p.value && !p.const) {
-        const ref = await this.place(args[i], sc);
+        const ref = await caller.place(args[i], sc);
         const v = { kind: 's', name: p.name, type, dim };
         const cur = ref.get();
         v.value = dim ? (Array.isArray(cur) ? cur.map((x) => coerce(type, x)) : Array(dim).fill(blank(type))) : coerce(type, cur);
         local.vars.set(p.name, v);
         back.push(() => ref.set(v.value));
       } else {
-        const val = await this.ev(args[i], sc);
+        const val = await caller.ev(args[i], sc);
         local.vars.set(p.name, {
           kind: 's', name: p.name, type, dim,
           value: dim ? (Array.isArray(val) ? val.map((x) => coerce(type, x)) : Array(dim).fill(blank(type))) : coerce(type, val),
@@ -863,16 +1253,23 @@ export class RpgProgram {
         if (t && (t.t === 'packed' || t.t === 'zoned')) return t.digits;
         return toStr(v).length;
       }
+      case '%OCCUR': return this.occDs(a[0], sc).occ.cur + 1;
       case '%SIZE': {
-        const { v, t } = await this.typed(a[0], sc);
-        if (t) {
-          if (t.t === 'packed') return Math.floor(t.digits / 2) + 1;
-          if (t.t === 'int' || t.t === 'uns') return t.bits / 8;
-          return charLen(t);
+        // %SIZE no lee el dato: sólo su tipo (un numérico sin inicializar no da error)
+        const all = a[1] && a[1].k === 'sp' && a[1].v === '*ALL';
+        if (['id', 'dot', 'idx', 'call'].includes(a[0].k) && (a[0].k !== 'call' || sc.lookup(a[0].name))) {
+          const p = await this.place(a[0], sc);
+          if (p.dsvar) return this.dsLen(p.dsvar.tmpl) * (all && p.dsvar.dim ? p.dsvar.dim : all && p.dsvar.occ ? p.dsvar.occ.n : 1);
+          if (p.type) {
+            const sz = p.type.t === 'varchar' ? p.type.len + 2 : byteLen(p.type) || charLen(p.type);
+            return sz * (all && p.var && p.var.dim ? p.var.dim : 1);
+          }
         }
+        const { v } = await this.typed(a[0], sc);
         return toStr(v).length;
       }
       case '%ELEM': {
+        if (a[0].k === 'id') { const ov = sc.lookup(a[0].name); if (ov && ov.kind === 'ds' && ov.occ) return ov.occ.n; }
         const p = await this.place(a[0], sc);
         if (p.var && p.var.dim) return p.var.dim;
         if (p.insts) return p.insts.length;
@@ -992,6 +1389,8 @@ export class RpgProgram {
       }
       case '%NULLIND': return '0';
       case '%ADDR': case '%PADDR': return null;
+      // %STR: los "punteros" a cadena de las APIs del sistema (getenv…) son cadenas JS terminadas en NUL.
+      case '%STR': { const s0 = a[0] ? await this.ev(a[0], sc) : ''; const t = s0 === null || s0 === undefined ? '' : toStr(s0).split('\u0000')[0]; return a[1] ? t.slice(0, toNumber(await this.ev(a[1], sc))) : t; }
       default:
         throw new RpgError('00202', 'RNF7030', `Built-in function ${e.name} is not supported.`);
     }
@@ -1044,8 +1443,9 @@ export class RpgProgram {
       if (ent.def.device === 'WORKSTN') return this.workstnOp(ent, s, sc);
       if (ent.def.device === 'PRINTER') {
         if (op === 'WRITE') {
+          if (ent.pfmt) return this.writePrtf(ent, s, sc);
           const v = s.ds ? toStr((await this.place({ k: 'id', name: s.ds }, sc)).get()) : '';
-          ent.h.write(v);
+          this.printerFor(ent).line(v, {});
         }
         return;
       }
@@ -1261,6 +1661,42 @@ export class RpgProgram {
     }
   }
 
+  /** Número de filas de FOR n ROWS / n ROWS: literal o variable del lenguaje principal. */
+  async rowCount(spec, sc) {
+    const t = String(spec).replace(/\s+/g, '');
+    if (t.startsWith(':')) return Math.trunc(toNumber((await this.hostValues([t.slice(1).toUpperCase()], sc))[0]));
+    return Math.trunc(Number(t));
+  }
+
+  /** Instancias (una por fila) de una DS de múltiples apariciones o de un array de DS. */
+  rowInsts(name, sc) {
+    const v = sc.lookup(String(name).toUpperCase());
+    if (!v || v.kind !== 'ds') return null;
+    if (Array.isArray(v.inst)) return v.inst;
+    if (!v.occ) return null;
+    // una vista fija por aparición sobre el mismo buffer (no cambia la aparición actual)
+    return Array.from({ length: v.occ.n }, (_, i) => this.makeInst(v.tmpl, { buf: v.inst.buf, base: i * v.inst.len }));
+  }
+
+  /** FETCH … FOR n ROWS INTO :ds — SQLERRD(3) = filas leídas; SQLERRD(5) = 100 si se ha leído la última fila. */
+  async fetchRows(cur, nSpec, target, sc) {
+    const name = String(target).trim().replace(/^:\s*/, '');
+    const insts = this.rowInsts(name, sc);
+    if (!insts) { this.setSqlca(-312, '42618', 'Host variable ' + name + ' is not a multiple-occurrence data structure or data structure array.'); return; }
+    const n = Math.min(await this.rowCount(nSpec, sc), insts.length);
+    if (cur.pos < 0) cur.pos = 0;
+    const rows = cur.rows.slice(cur.pos, cur.pos + n);
+    cur.pos += rows.length;
+    const errd = this.globals.vars.get('SQLERRD').value;
+    if (!rows.length) { this.setSqlca(100, '02000', 'Row not found for FETCH.'); errd[4] = 100; return; }
+    rows.forEach((row, i) => {
+      const fields = [...insts[i].fields.values()].filter((f) => f.kind === 's');
+      fields.forEach((f, j) => { if (j < row.length) f.value = coerce(f.type, row[j] ?? blank(f.type)); });
+    });
+    this.setSqlca(0, '00000', '', rows.length);
+    errd[4] = cur.pos >= cur.rows.length ? 100 : 0;
+  }
+
   setSqlca(code, state, msg = '', rows = 0) {
     const g = this.globals.vars;
     g.get('SQLCODE').value = code; g.get('SQLCOD').value = code;
@@ -1279,11 +1715,22 @@ export class RpgProgram {
   async execSql(text, sc) {
     const T = text.trim();
     const U = T.toUpperCase();
+    let m;
+    // Control de compromiso: SET OPTION COMMIT = *CHG|*CS|*ALL|*NONE, COMMIT [HOLD], ROLLBACK [HOLD]
+    if ((m = /^SET\s+OPTION\b[\s\S]*\bCOMMIT\s*=\s*(\*\w+)/i.exec(T)) && this.host.sqlControl) {
+      const r = await this.host.sqlControl('OPTION', { commit: m[1].toUpperCase() });
+      if (r && r.error) this.setSqlca(r.sqlcode ?? -901, r.sqlstate || '58004', r.error); else this.setSqlca(0, '00000');
+      return;
+    }
+    if ((m = /^(COMMIT|ROLLBACK)(?:\s+WORK)?(\s+HOLD)?\s*$/i.exec(T)) && this.host.sqlControl) {
+      const r = await this.host.sqlControl(m[1].toUpperCase(), { hold: !!m[2] });
+      if (r && r.error) this.setSqlca(r.sqlcode ?? -901, r.sqlstate || '58004', r.error); else this.setSqlca(0, '00000');
+      return;
+    }
     if (/^SET\s+OPTION\b/.test(U) || /^(COMMIT|ROLLBACK)\b/.test(U) || /^WHENEVER\b/.test(U) || /^INCLUDE\b/.test(U)) {
       this.setSqlca(0, '00000');
       return;
     }
-    let m;
     if ((m = /^DECLARE\s+([\w#@$]+)\s+(?:(?:INSENSITIVE|SENSITIVE|ASENSITIVE|NO\s+SCROLL|SCROLL|DYNAMIC)\s+)*CURSOR\s+(?:WITH(?:OUT)?\s+(?:HOLD|RETURN)\s+)*FOR\s+([\s\S]+)$/i.exec(T))) {
       const src = m[2].trim();
       this.cursors.set(m[1].toUpperCase(), /^[\w#@$]+$/.test(src) ? { stmt: src.toUpperCase() } : { text: src });
@@ -1334,7 +1781,8 @@ export class RpgProgram {
       this.setSqlca(0, '00000');
       return;
     }
-    if ((m = /^FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|BEFORE|AFTER|CURRENT|RELATIVE\s+-?\d+|ABSOLUTE\s+\d+)\s+)?(?:FROM\s+)?([\w#@$]+)\s+(?:FOR\s+\S+\s+ROWS\s+)?INTO\s+([\s\S]+)$/i.exec(T))) {
+    if ((m = /^FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|BEFORE|AFTER|CURRENT|RELATIVE\s+-?\d+|ABSOLUTE\s+\d+)\s+)?(?:FROM\s+)?([\w#@$]+)\s+(?:FOR\s+(\S+)\s+ROWS\s+)?INTO\s+([\s\S]+)$/i.exec(T))) {
+      m = [m[0], m[1], m[2], m[4], m[3]];
       const cur = this.cursors.get(m[2].toUpperCase());
       if (!cur || !cur.rows) { this.setSqlca(-501, '24501', `Cursor ${m[2]} not open.`); return; }
       const dir = (m[1] || 'NEXT').toUpperCase();
@@ -1344,12 +1792,26 @@ export class RpgProgram {
       else if (dir.startsWith('RELATIVE')) cur.pos += Number(dir.split(/\s+/)[1]) - 1;
       else if (dir.startsWith('ABSOLUTE')) cur.pos = Number(dir.split(/\s+/)[1]) - 1;
       else if (dir === 'CURRENT') cur.pos -= 1;
+      if (m[4]) return this.fetchRows(cur, m[4], m[3], sc);
       const row = cur.rows[cur.pos];
       cur.pos++;
       if (!row || cur.pos < 1) { this.setSqlca(100, '02000', 'Row not found for FETCH.'); if (cur.pos < 0) cur.pos = 0; return; }
       const targets = this.hostVars(m[3]).vars;
       await this.assignRow(targets, row, sc);
       this.setSqlca(0, '00000', '', 1);
+      return;
+    }
+    // INSERT INTO t n ROWS VALUES(:ds): inserción de varias filas desde una DS de múltiples apariciones o un array de DS
+    if ((m = /^INSERT\s+INTO\s+([\s\S]+?)\s+(:\s*[\w#@$]+|\d+)\s+ROWS\s+VALUES\s*\(\s*:\s*([\w#@$]+)\s*\)\s*$/i.exec(T))) {
+      const n = await this.rowCount(m[2], sc);
+      const insts = this.rowInsts(m[3], sc);
+      if (!insts) { this.setSqlca(-312, '42618', `Host variable ${m[3]} is not a multiple-occurrence data structure or data structure array.`); return; }
+      const k = Math.min(n, insts.length);
+      if (k <= 0) { this.setSqlca(0, '00000', '', 0); return; }
+      const rowsVals = insts.slice(0, k).map((inst) => [...inst.fields.values()].filter((f) => f.kind === 's').map((f) => (f.type && f.type.t === 'char' ? toStr(f.value).replace(/\s+$/, '') : f.value)));
+      const marks = '(' + rowsVals[0].map(() => '?').join(', ') + ')';
+      const r = await this.runQuery('INSERT INTO ' + m[1] + ' VALUES ' + rowsVals.map(() => marks).join(', '), rowsVals.flat());
+      if (r) this.setSqlca(0, '00000', '', k);
       return;
     }
     // SELECT … INTO :a, :b FROM …  /  VALUES expr INTO :x  /  SET :x = expr
@@ -1383,7 +1845,7 @@ export class RpgProgram {
 
 // ---------- Utilidades ----------
 function indKey(v) {
-  const m = /^\*IN(\d\d|LR|RT|H\d|U\d|K[A-Y])$/.exec(v);
+  const m = /^\*IN(\d\d|LR|RT|L[1-9]|MR|1P|OF|OV|O[A-G]|H\d|U\d|K[A-Y])$/.exec(v);
   return m ? m[1] : null;
 }
 

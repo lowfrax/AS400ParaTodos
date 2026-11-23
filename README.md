@@ -82,6 +82,12 @@ Las contraseñas no distinguen mayúsculas (QPWDLVL 0). Tras 3 intentos fallidos
 | `SBMJOB CMD(CALL PGM(NIGHTLY))` | Trabajo por lotes en QBATCH (visible en `WRKACTJOB`), al terminar se enciende **MW** en el OIA → `DSPMSG` |
 | `STRPDM` → 3 → `QRPGLESRC` | PDM: 2=Editar (SEU), 14=Compilar (se envía a QBATCH), 5=Ver |
 | `STRSEU SRCFILE(QRPGLESRC) SRCMBR(NUEVO) TYPE(RPGLE)` | SEU con órdenes de línea (`I`, `I5`, `D`, `DD…DD`, `C`/`M` + `A`/`B`, `R`), `FIND`, `TOP`, `BOTTOM`, pantalla *Exit* |
+| `STRSDA` (o PDM opción 17) | SDA: diseñar pantallas sobre una imagen 24×80 (constantes, `+I(10)`, `+B(30)`, `+9(7,2)`, F10 campos de base de datos con `&1`, F4 campos), menús (MNUDDS + mandatos) y probar archivos de pantalla |
+| `GO MIBIB/MIMENU` | Menú de usuario creado con SDA o `CRTMNU`; la opción *n* ejecuta el mandato USR00*nn* del archivo de mensajes *menú*QQ |
+| `OVRDBF` / `OVRPRTF` + `CALL` | Alteraciones con ámbito de nivel de llamada; `DSPOVR`, `DLTOVR` |
+| `ADDJOBSCDE … FRQ(*WEEKLY)` | Planificador de trabajos (QSYSSCD); `WRKJOBSCDE` con opciones 2/3/4/5/6 |
+| `RUNSQLSTM SRCSTMF('/tmp/x.sql')` | Guiones SQL con control de compromiso y listado |
+| `ssh -p 2222 qsecofr@localhost` | OpenSSH/QSH: `system "DSPLIBL"`, `db2 "SELECT …"`; `sftp` sobre el IFS y `/QSYS.LIB` |
 | `CRTBNDRPG PGM(NUEVO)` | Compilación: mensaje RNS9304 o errores RNF con listado en spool |
 | `STRSQL` | *Enter SQL Statements* y *Display Data* (`select * from customer`) |
 | `WRKACTJOB`, `WRKSYSSTS` | Trabajos y métricas reales del sistema (los trabajos QSQSRVR reflejan la actividad del gateway) |
@@ -92,6 +98,8 @@ Las contraseñas no distinguen mayúsculas (QPWDLVL 0). Tras 3 intentos fallidos
 ### Mandatos disponibles
 
 `SIGNOFF GO WRKACTJOB WRKSYSSTS WRKSBS WRKSPLF WRKOUTQ DSPMSG SNDMSG DSPJOBLOG DSPJOB WRKJOB DSPLIBL CHGCURLIB ADDLIBLE RMVLIBLE CHGLIBL CRTLIB DLTLIB CLRLIB DSPLIB WRKLIB WRKOBJ DSPOBJD DLTOBJ DLTPGM DLTF CHKOBJ CRTSRCPF ADDPFM RMVM STRSEU STRPDM WRKLIBPDM WRKOBJPDM WRKMBRPDM CRTBNDRPG CRTRPGPGM CRTSQLRPGI CRTBNDCL CRTCLPGM CRTPF CRTDSPF CALL SBMJOB DLYJOB ENDJOB STRSQL RUNSQL DSPPFM DSPFFD CLRPFM CPYF CRTDTAARA DSPDTAARA CHGDTAARA CRTUSRPRF CHGUSRPRF CHGPRF CHGPWD DLTUSRPRF WRKUSRPRF DSPUSRPRF WRKSYSVAL DSPSYSVAL CHGSYSVAL SNDPGMMSG PWRDWNSYS` y `CALL QCMD` (*Command Entry*). En programas CL además: `PGM DCL CHGVAR IF/ELSE DO DOWHILE DOUNTIL DOFOR SELECT/WHEN GOTO LEAVE ITERATE RETURN MONMSG (EXEC(DO)) RTVJOBA RTVSYSVAL RTVDTAARA`.
+
+Además: `STRSDA CRTMNU CHGMNU DLTMNU OVRDBF OVRPRTF DLTOVR DSPOVR CPYSPLF DLTSPLF HLDSPLF RLSSPLF CHGSPLFA RUNSQLSTM CRTDUPOBJ RNMOBJ MOVOBJ CHGOBJD CPYSRCF RNMM ADDJOBSCDE CHGJOBSCDE RMVJOBSCDE HLDJOBSCDE RLSJOBSCDE WRKJOBSCDE CRTLF CRTPRTF CRTRPGMOD CRTSRVPGM CRTPGM UPDPGM UPDSRVPGM CRTBNDDIR ADDBNDDIRE CRTMSGF ADDMSGD CHGMSGD RMVMSGD DSPMSGD WRKMSGF RTVMSG RCVMSG SNDUSRMSG CVTRPGSRC` (y `STRQSH`/`QSH`, FTP, SSH, REXEC).
 
 ### RPG IV soportado
 
@@ -128,8 +136,15 @@ Los sonidos se sintetizan con Web Audio (clic de teclado tipo *buckling spring*,
 ## Pruebas
 
 ```bash
-npm test             # pruebas unitarias del lenguaje (RPG, CL, DDS) y archivos por clave sobre Db2
-npm run test:e2e     # recorrido completo por WebSocket contra un sistema en marcha
+npm test                 # unitarias: RPG (todos los dialectos, ciclo, DS, OCCURS, SQL de varias filas), CL, DDS y SDA
+npm run test:e2e         # recorrido completo por el terminal 5250 contra un sistema en marcha
+npm run test:rpg         # dialectos RPG, LF, PRTF y SQL incrustado sobre Db2
+npm run test:ile         # módulos, programas de servicio, directorios de enlace y activación
+npm run test:msg         # archivos de mensajes, SNDPGMMSG/RCVMSG/MONMSG
+npm run test:util        # OVRDBF/OVRPRTF, spool, RUNSQLSTM, objetos y planificador
+npm run test:ssh         # OpenSSH/SFTP con el cliente ssh del sistema
+npm run test:sda         # SDA por el terminal 5250: pantallas, prueba de pantallas, menús y GO
+npm run test:connections # TN5250, FTP, servidores host (jt400), REST/IWS, Mapepire, DRDA…
 ```
 
 La prueba e2e y la de archivos por clave necesitan el sistema en marcha (`npm start`); sin él, la de archivos por clave se omite. La prueba e2e inicia sesión, ejecuta los programas de ejemplo, edita un miembro en SEU con órdenes de línea, compila, provoca un error RNQ0102, envía un trabajo por lotes y comprueba el MW/DSPMSG.
@@ -153,8 +168,15 @@ docker-compose.yml      Db2 + los tres servicios
 
 ## Limitaciones conocidas
 
-- No es un sistema operativo IBM i: no hay seguridad a nivel de objeto, diarios (journaling), control de compromiso, colas de datos ni el protocolo TN5250 binario (el emulador habla JSON por WebSocket; no se puede conectar ACS real).
-- Las pantallas reproducen el aspecto y la navegación de IBM i 7.x a partir de documentación y capturas públicas; algunos textos de ayuda (F1) son genéricos.
-- RPG: no hay `O-specs`/`EXCEPT`, punteros, `%ADDR`, módulos/programas de servicio ILE ni `DATA-STRUCTURE OVERLAY/POS`. Los archivos lógicos y `CRTLF` no están implementados (use vistas SQL).
-- QTEMP es una biblioteca compartida, no por trabajo.
-"# AS400ParaTodos" 
+Implementado y comprobado contra Db2 real: TN5250 (ACS, tn5250j), FTP/FTPS, servidores host de jt400/ODBC, DRDA,
+REST/IWS, Mapepire, SSH/SFTP, SMTP; RPG II/III/IV/libre con el ciclo, ILE (módulos, programas de servicio,
+directorios de enlace), archivos lógicos, de impresora y de pantalla, DS sobre bytes EBCDIC y de múltiples
+apariciones, SQL incrustado, control de compromiso, colas de datos, archivos de mensajes, alteraciones,
+planificador, PDM, SEU y SDA. Lo que todavía no tiene un equivalente:
+
+- Seguridad a nivel de objeto (`GRTOBJAUT`, `RVKOBJAUT`, `EDTOBJAUT`, listas de autorizaciones): los perfiles y las contraseñas sí se comprueban.
+- Diarios (`CRTJRN`, `CRTJRNRCV`, `STRJRNPF`, `DSPJRN`): el control de compromiso usa transacciones de Db2, así que `CRTSQLRPGI` usa `COMMIT(*NONE)` por omisión en lugar de `*CHG` (en un IBM i, `*CHG` sobre tablas sin diario da SQL7008).
+- Salvar y restaurar (`SAVLIB`, `RSTLIB`, `SAVOBJ`, `CRTSAVF`), depuración (`STRDBG`), mandatos de usuario (`CRTCMD`), Query/400 (`WRKQRY`) y RLU.
+- QTEMP es una biblioteca compartida, no una por trabajo.
+- Las pantallas reproducen el aspecto y la navegación de IBM i 7.x a partir de documentación pública; algunos textos de ayuda (F1) son genéricos.
+ 

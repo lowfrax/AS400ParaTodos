@@ -1,20 +1,25 @@
 // Compilación de miembros fuente: RPGLE/SQLRPGLE/RPG (fijo), CLLE/CLP, PF y DSPF.
 import { compileRpg, CompileError } from '../../../shared/rpg/parser.js';
 import { compileCL } from '../../../shared/cl.js';
-import { parsePF, parseDSPF, pfToSql } from '../../../shared/dds.js';
+import { parsePF, parseDSPF, pfToSql, parseLF, lfToSql, parsePRTF, ddsReferences } from '../../../shared/dds.js';
 import { describeFile, findObject, objectData, readMember } from '../../../shared/catalog.js';
 
 const SQLCA = ['SQLCODE', 'SQLCOD', 'SQLSTATE', 'SQLSTT', 'SQLERRMC', 'SQLER3', 'SQLERRD'];
-const BUILTIN_NAMES = ['UDATE', 'UYEAR', 'UMONTH', 'UDAY', '*N'];
+const BUILTIN_NAMES = ['UDATE', 'UYEAR', 'UMONTH', 'UDAY', '*N', '$CALLLR$'];
+const OPM_TYPES = { RPG: 'RPG', RPG38: 'RPG38', RPG36: 'RPG36', RPT: 'RPG', RPT38: 'RPG38', RPT36: 'RPG36' };
 
 export const PRODUCT = {
   RPGLE: { id: '5770WDS', name: 'ILE RPG', cmd: 'CRTBNDRPG' },
   SQLRPGLE: { id: '5770ST1', name: 'ILE RPG (SQL precompiler)', cmd: 'CRTSQLRPGI' },
-  RPG: { id: '5770WDS', name: 'ILE RPG', cmd: 'CRTBNDRPG' },
+  RPG: { id: '5770WDS', name: 'RPG/400', cmd: 'CRTRPGPGM' },
+  RPG38: { id: '5770WDS', name: 'RPG/38', cmd: 'CRTRPGPGM' },
+  RPG36: { id: '5770WDS', name: 'RPG II (System/36 environment)', cmd: 'CRTRPGPGM' },
   CLLE: { id: '5770SS1', name: 'ILE CL', cmd: 'CRTBNDCL' },
   CLP: { id: '5770SS1', name: 'ILE CL', cmd: 'CRTBNDCL' },
   PF: { id: '5770SS1', name: 'DDS', cmd: 'CRTPF' },
   DSPF: { id: '5770SS1', name: 'DDS', cmd: 'CRTDSPF' },
+  LF: { id: '5770SS1', name: 'DDS', cmd: 'CRTLF' },
+  PRTF: { id: '5770SS1', name: 'DDS', cmd: 'CRTPRTF' },
 };
 
 /**
@@ -29,28 +34,21 @@ export async function compile(gw, req) {
   const libl = req.libl && req.libl.length ? req.libl : ['QGPL'];
   const t0 = Date.now();
   try {
-    if (type === 'RPGLE' || type === 'SQLRPGLE' || type === 'RPG' || type === 'RPG38' || type === 'RPGIV') {
+    if (type === 'RPGLE' || type === 'SQLRPGLE' || type === 'RPGIV' || OPM_TYPES[type]) {
       const includes = await prefetchIncludes(gw, lines, libl, req.lib);
       const ir = compileRpg(lines, {
         name: req.name,
+        dialect: OPM_TYPES[type] ? 'RPG3' : 'RPG4',
         includeResolver: ({ lib, file, member }) => includes.get(`${lib || ''}/${file}/${member}`) || includes.get(`/${file}/${member}`) || null,
       });
       await semanticRpg(gw, ir, libl, add);
-      object = { type: '*PGM', attr: type === 'SQLRPGLE' ? 'SQLRPGLE' : 'RPGLE', data: { kind: 'RPG', ir } };
+      object = { type: '*PGM', attr: OPM_TYPES[type] || (type === 'SQLRPGLE' ? 'SQLRPGLE' : 'RPGLE'), data: { kind: 'RPG', ir } };
     } else if (type === 'CLLE' || type === 'CLP') {
       const ir = compileCL(lines);
       semanticCl(ir, lines, add);
       object = { type: '*PGM', attr: 'CLLE', data: { kind: 'CL', ir } };
-    } else if (type === 'PF') {
-      const pf = parsePF(lines);
-      object = { type: '*FILE', attr: 'PF', data: { kind: 'PF', ...pf, sql: pfToSql(req.lib, req.name, pf) } };
-      add('CPC7301', 0, `DDS for file ${req.name} in ${req.lib} validated. ${pf.fields.length} fields, ${pf.keys.length} key field(s).`);
-    } else if (type === 'DSPF') {
-      const d = parseDSPF(lines);
-      const nf = Object.keys(d.formats).length;
-      if (!nf) throw new CompileError('CPD7411', 'No record formats defined.', 1);
-      object = { type: '*FILE', attr: 'DSPF', data: d };
-      add('CPC7301', 0, `DDS for file ${req.name} in ${req.lib} validated. ${nf} record format(s).`);
+    } else if (type === 'PF' || type === 'LF' || type === 'DSPF' || type === 'PRTF') {
+      object = await compileDds(gw, type, req, lines, libl, add);
     } else {
       add('CPD0078', 40, `Source type ${type} not supported by this compiler.`);
     }
@@ -89,15 +87,67 @@ async function prefetchIncludes(gw, lines, libl, curLib, depth = 0, map = new Ma
   return map;
 }
 
+// ---------- DDS: PF, LF, DSPF, PRTF (con REF/REFFLD/PFILE/JFILE resueltos contra el catálogo) ----------
+async function compileDds(gw, type, req, lines, libl, add) {
+  const refs = {};
+  const refLib = {};
+  for (const f of ddsReferences(lines)) {
+    const q = f.includes('/') ? f : `*LIBL/${f}`;
+    try {
+      const d = await describeFile(gw, q, [req.lib, ...libl.filter((l) => l !== req.lib)]);
+      const short = f.replace(/^.*\//, '');
+      refs[short] = d;
+      refLib[short] = d.lib;
+    } catch { /* se informa al usarse */ }
+  }
+  if (type === 'PF') {
+    const pf = parsePF(lines, refs);
+    add('CPC7301', 0, `DDS for file ${req.name} in ${req.lib} validated. ${pf.fields.length} fields, ${pf.keys.length} key field(s).`);
+    return { type: '*FILE', attr: 'PF', data: { kind: 'PF', ...pf, sql: pfToSql(req.lib, req.name, pf) } };
+  }
+  if (type === 'LF') {
+    const lf = parseLF(lines, refs);
+    const sql = lfToSql(req.lib, req.name, lf, (pf) => refLib[pf] || req.lib);
+    add('CPC7301', 0, `DDS for logical file ${req.name} in ${req.lib} validated. Based on ${lf.pfiles.join(', ')}; ${lf.fields.length} fields, ${lf.keys.length} key field(s).`);
+    return {
+      type: '*FILE', attr: 'LF',
+      data: { kind: 'LF', format: lf.format, text: lf.text, pfiles: lf.pfiles.map((p) => ({ lib: refLib[p], file: p })), join: lf.join, keys: lf.keys, keyDesc: lf.keyDesc, unique: lf.unique, fields: lf.fields.map((f) => f.name), sql },
+    };
+  }
+  if (type === 'DSPF') {
+    const d = parseDSPF(lines, refs);
+    const nf = Object.keys(d.formats).length;
+    if (!nf) throw new CompileError('CPD7411', 'No record formats defined.', 1);
+    add('CPC7301', 0, `DDS for file ${req.name} in ${req.lib} validated. ${nf} record format(s).`);
+    return { type: '*FILE', attr: 'DSPF', data: d };
+  }
+  const p = parsePRTF(lines, refs);
+  add('CPC7301', 0, `DDS for printer file ${req.name} in ${req.lib} validated. ${Object.keys(p.formats).length} record format(s).`);
+  return { type: '*FILE', attr: 'PRTF', data: p };
+}
+
 // ---------- Análisis semántico RPG ----------
 async function semanticRpg(gw, ir, libl, add) {
   const globals = new Set([...SQLCA, ...BUILTIN_NAMES]);
+  if ((ir.ospecs || []).length) for (const n of ['PAGE', 'PAGE1', 'PAGE2', 'PAGE3', 'PAGE4', 'PAGE5', 'PAGE6', 'PAGE7']) globals.add(n);
   const fileNames = new Set();
   const dsFields = new Map();
   for (const f of ir.files) {
     fileNames.add(f.name);
     try {
-      if (f.device === 'DISK') {
+      if (f.device === 'PRINTER') {
+        // Archivo de impresora descrito externamente (PRTF): sus formatos y campos
+        const qn = f.extfile || f.name;
+        const [lib, name] = qn.includes('/') ? qn.split('/') : ['*LIBL', qn];
+        const o = await findObject(gw, name, '*FILE', lib, libl).catch(() => null);
+        const data = o ? await objectData(gw, o.LIB, name, '*FILE') : null;
+        if (data && data.kind === 'PRTF') {
+          for (const [fmt, def] of Object.entries(data.formats)) {
+            fileNames.add(f.rename[fmt] || fmt);
+            for (const fld of def.items) if (fld.name) globals.add((f.prefix || '') + fld.name);
+          }
+        }
+      } else if (f.device === 'DISK') {
         const d = await describeFile(gw, f.extfile || f.name, libl);
         fileNames.add(f.rename[d.format] || d.format);
         for (const fld of d.fields) globals.add((f.prefix || '') + fld.name);
@@ -155,6 +205,7 @@ async function semanticRpg(gw, ir, libl, add) {
         if (!scope.has(e.name) && !callables.has(e.name)) undefinedName(e.name, line);
         return;
       case 'call':
+        if (/^\$[A-Z]+\$$/.test(e.name)) { e.args.forEach((a) => checkExpr(a, scope, line)); return; }
         if (!scope.has(e.name) && !callables.has(e.name)) undefinedName(e.name, line);
         e.args.forEach((a) => checkExpr(a, scope, line));
         return;
@@ -190,7 +241,8 @@ async function semanticRpg(gw, ir, libl, add) {
         case 'exsr': if (!localSubrs.has(s.name) && !subrs.has(s.name)) add('RNF7030', 30, `The subroutine ${s.name} is not defined.`, L); break;
         case 'dsply': checkExpr(s.msg, scope, L); checkExpr(s.resp, scope, L); break;
         case 'clear': case 'reset': case 'sorta': checkExpr(s.target, scope, L); break;
-        case 'move': checkExpr(s.src, scope, L); checkExpr(s.target, scope, L); break;
+        case 'move': case 'movea': checkExpr(s.src, scope, L); checkExpr(s.target, scope, L); break;
+        case 'test': case 'bit': checkExpr(s.target, scope, L); break;
         case 'callpgm': s.parms.forEach((p) => checkExpr(p, scope, L)); break;
         case 'file':
           if (!s.file.startsWith('*') && !fileNames.has(s.file)) add('RNF7030', 30, `The file or record format ${s.file} is not defined.`, L);
@@ -212,6 +264,7 @@ async function semanticRpg(gw, ir, libl, add) {
     }
   };
   checkStmts(ir.main, globals, new Set());
+  for (const t of ir.totals || []) checkStmts(t.body, globals, new Set());
   for (const sr of Object.values(ir.subrs)) checkStmts(sr, globals, new Set());
   for (const p of Object.values(ir.procs)) {
     const local = new Set(globals);
@@ -228,7 +281,9 @@ async function semanticRpg(gw, ir, libl, add) {
 }
 
 function hasLrOrReturn(ir) {
-  const s = JSON.stringify([ir.main, ir.subrs]);
+  // Con archivo primario el ciclo termina solo (LR al fin de archivo)
+  if (Object.values(ir.filex || {}).some((f) => f.desig === 'P')) return true;
+  const s = JSON.stringify([ir.main, ir.subrs, ir.totals || []]);
   return s.includes('"*INLR"') || s.includes('"op":"return"');
 }
 
@@ -263,7 +318,7 @@ export function makeListing(req, lines, source, messages, severity, ok, created)
   };
   header();
   out.push(` Command . . . . . . . . . . . . :   ${prod.cmd}`);
-  out.push(`   ${req.type === 'PF' || req.type === 'DSPF' ? 'File' : 'Program'} . . . . . . . . . . . :   ${req.name}`);
+  out.push(`   ${['PF', 'LF', 'DSPF', 'PRTF'].includes(req.type) ? 'File' : 'Program'} . . . . . . . . . . . :   ${req.name}`);
   out.push(`     Library . . . . . . . . . . :     ${req.lib}`);
   out.push(`   Source file . . . . . . . . . :   ${req.srcfile || ''}`);
   out.push(`     Library . . . . . . . . . . :     ${req.srclib || req.lib}`);
@@ -314,7 +369,7 @@ export function makeListing(req, lines, source, messages, severity, ok, created)
   out.push(`   Specifications . . . . . . . . :   ${lpad(lines.filter((l) => l && l.trim() && !l.trim().startsWith('//')).length, 6)}`);
   out.push(`   Comments . . . . . . . . . . . :   ${lpad(lines.filter((l) => l && l.trim().startsWith('//')).length, 6)}`);
   out.push('');
-  const objType = req.type === 'PF' || req.type === 'DSPF' ? 'File' : 'Program';
+  const objType = ['PF', 'LF', 'DSPF', 'PRTF'].includes(req.type) ? 'File' : 'Program';
   if (ok) out.push(` ${objType} ${req.name} placed in library ${req.lib}. ${String(severity).padStart(2, '0')} highest severity. Created on ${date} at ${time}.`);
   else out.push(` ${objType} ${req.name} not created in library ${req.lib}. Maximum error severity ${String(severity).padStart(2, '0')}.`);
   out.push(' * * * * *   E N D   O F   C O M P I L A T I O N   * * * * *');

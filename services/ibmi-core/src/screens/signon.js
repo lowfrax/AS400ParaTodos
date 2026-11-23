@@ -2,7 +2,7 @@
 import { Panel } from '../panel.js';
 import { SYS, createJob, logJob } from '../system.js';
 import { msgText } from '../messages.js';
-import { getUser, updateUser, hashPassword, sysval, libExists } from '../objects.js';
+import { getUser, updateUser, hashPassword, sysval, libExists, passwordTokens } from '../objects.js';
 
 export const IPL_STEPS = [
   'Storage Management Recovery',
@@ -77,6 +77,7 @@ export async function signOn(session) {
       message = { id: 'CPF2110', text: msgText('CPF2110', curlibIn), sev: 40 };
       continue;
     }
+    if (!prf.PWDTOKEN) await updateUser(user, { PWDTOKEN: passwordTokens(user, pwd) }).catch(() => {});
     await updateUser(user, { INVALID: 0, LASTSIGN: new Date().toISOString().replace('T', ' ').slice(0, 19), SIGNONS: Number(prf.SIGNONS || 0) + 1 });
     const job = createJob({ name: session.device, user, type: 'INT', subsystem: 'QINTER', fn: '', status: 'RUN' });
     const usrlibl = String((await sysval('QUSRLIBL')) || 'QGPL QTEMP').split(/\s+/).filter(Boolean);

@@ -36,15 +36,19 @@ export async function describeFile(gw, qname, libl) {
     if (!Array.isArray(cols) || !cols.length) continue;
     let keys = cols.filter((c) => c.keyseq).sort((a, b) => a.keyseq - b.keyseq).map((c) => c.name);
     let format = file;
+    let keyDesc = [];
+    let rrn = 'rid';
+    let attr = 'PF';
     try {
       const meta = await objectData(gw, lib, file, '*FILE');
-      if (meta && meta.keys && meta.keys.length) keys = meta.keys;
+      if (meta && meta.keys && meta.keys.length) { keys = meta.keys; keyDesc = meta.keyDesc || []; }
       if (meta && meta.format) format = meta.format;
+      if (meta && meta.kind === 'LF') { attr = 'LF'; rrn = meta.join ? null : 'col'; }
     } catch { /* tabla creada por SQL sin metadatos */ }
     return {
-      lib, schema: lib, table: file, format,
-      fields: cols.map((c) => ({ name: c.name, type: sqlTypeToRpg(c), sqlType: c.type, length: c.length, scale: c.scale, text: c.text })),
-      keys,
+      lib, schema: lib, table: file, format, attr, rrn,
+      fields: cols.filter((c) => c.name !== '$RRN').map((c) => ({ name: c.name, type: sqlTypeToRpg(c), sqlType: c.type, length: c.length, scale: c.scale, text: c.text })),
+      keys, keyDesc,
     };
   }
   throw new ObjectNotFound('CPF4101', `File ${file} in library ${libPart} not found or inline data file missing.`);

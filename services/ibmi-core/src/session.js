@@ -19,10 +19,15 @@ function allocDevice() {
 }
 
 export class Session {
-  constructor(ws, remote) {
+  constructor(ws, remote, opts = {}) {
     this.ws = ws;
     this.remote = remote;
-    this.device = allocDevice();
+    this.kind = opts.kind || 'web';
+    this.termType = opts.termType || 'WEB-5250';
+    this.secure = !!opts.tls;
+    const want = opts.device && /^[A-Z#@$][A-Z0-9_#@$]{0,9}$/.test(opts.device) && !devices.has(opts.device) ? opts.device : null;
+    if (want) devices.add(want);
+    this.device = want || allocDevice();
     this.job = null;
     this.user = null;
     this.libl = [];

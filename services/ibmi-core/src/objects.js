@@ -1,13 +1,32 @@
 // Acceso al "sistema de objetos" del IBM i almacenado en Db2.
 import crypto from 'node:crypto';
 import { createGateway } from '../../../shared/gateway.js';
-import { describeFile, findObject, objectData, readMember, findMember } from '../../../shared/catalog.js';
+import { describeFile, findObject as findCatalogObject, objectData, readMember, findMember } from '../../../shared/catalog.js';
 import { CLError } from './messages.js';
 
 export const gw = createGateway(process.env.GATEWAY_URL || 'http://localhost:5252', 'ibmi-core');
-export { describeFile, findObject, objectData, readMember, findMember };
+export { describeFile, objectData, readMember, findMember };
 
 export const SYSTEM_LIBS = ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'];
+
+/**
+ * Busca un objeto en QSYS.OBJECTS. Una tabla o vista creada con SQL (también por DRDA/JDBC directo a Db2) es un *FILE
+ * desde el momento en que existe, como en IBM i: si no se encuentra un *FILE se registran las tablas SQL de las
+ * bibliotecas de usuario buscadas y se repite la búsqueda.
+ */
+export async function findObject(g, name, type, lib, libl = []) {
+  const o = await findCatalogObject(g, name, type, lib, libl);
+  if (o || type !== '*FILE') return o;
+  const libs = (!lib || lib === '*LIBL' ? libl : [lib]).filter((l) => l && !SYSTEM_LIBS.includes(l));
+  if (!libs.length) return null;
+  for (const l of libs) await syncSqlTables(l).catch(() => {});
+  return findCatalogObject(g, name, type, lib, libl);
+}
+
+/** Tras un DROP TABLE/VIEW por SQL el objeto *FILE deja de existir. */
+export async function forgetSqlObject(lib, name) {
+  await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = '*FILE' AND ATTR IN ('PF', 'PF-DTA', 'LF')`, [lib, name]).catch(() => {});
+}
 // Marca de tiempo en hora local del sistema (como QDATE/QTIME), formato Db2 'YYYY-MM-DD HH:MM:SS.ffffff'.
 const now = () => {
   const d = new Date();
@@ -26,7 +45,7 @@ const DDL = [
   `CREATE TABLE QSYS.SOURCE (LIB VARCHAR(10) NOT NULL, SRCF VARCHAR(10) NOT NULL, MBR VARCHAR(10) NOT NULL,
      SEQ DECIMAL(6, 2) NOT NULL, DAT DECIMAL(6, 0) NOT NULL DEFAULT 0, SRCDTA VARCHAR(240) NOT NULL DEFAULT '',
      PRIMARY KEY (LIB, SRCF, MBR, SEQ))`,
-  `CREATE TABLE QSYS.USRPRF (NAME VARCHAR(10) NOT NULL PRIMARY KEY, PWDHASH VARCHAR(128) NOT NULL DEFAULT '',
+  `CREATE TABLE QSYS.USRPRF (NAME VARCHAR(10) NOT NULL PRIMARY KEY, PWDHASH VARCHAR(128) NOT NULL DEFAULT '', PWDTOKEN VARCHAR(256) NOT NULL DEFAULT '',
      USRCLS VARCHAR(10) NOT NULL DEFAULT '*USER', TEXT VARCHAR(50) NOT NULL DEFAULT '', CURLIB VARCHAR(10) NOT NULL DEFAULT '*CRTDFT',
      INLMNU VARCHAR(10) NOT NULL DEFAULT 'MAIN', INLPGM VARCHAR(21) NOT NULL DEFAULT '*NONE', STATUS VARCHAR(10) NOT NULL DEFAULT '*ENABLED',
      CREATED TIMESTAMP, LASTSIGN TIMESTAMP, INVALID INTEGER NOT NULL DEFAULT 0, SIGNONS INTEGER NOT NULL DEFAULT 0)`,
@@ -74,6 +93,19 @@ export function hashPassword(user, pwd) {
   return crypto.createHash('sha256').update(`${user.toUpperCase()}:${String(pwd).toUpperCase()}:as400`).digest('hex');
 }
 
+// Token SHA-1 de IBM i (QPWDLVL 2/3) que usan los servidores host (jt400, ODBC, ACS): SHA1(usuario UTF-16BE de 10 + contraseña UTF-16BE).
+// Las contraseñas del sistema no distinguen mayúsculas, así que se guardan las variantes MAYÚSCULAS, minúsculas y Capitalizada.
+const utf16be = (s) => Buffer.from(String(s), 'utf16le').swap16();
+export function shaPasswordToken(user, pwd) {
+  return crypto.createHash('sha1').update(Buffer.concat([utf16be(String(user).toUpperCase().padEnd(10).slice(0, 10)), utf16be(String(pwd).trim())])).digest();
+}
+export function passwordTokens(user, pwd) {
+  const p = String(pwd ?? '').trim();
+  if (!p || p === '*NONE') return '';
+  const variants = [...new Set([p.toUpperCase(), p.toLowerCase(), p[0].toUpperCase() + p.slice(1).toLowerCase(), p])];
+  return variants.map((v) => shaPasswordToken(user, v).toString('hex')).join(',');
+}
+
 export async function initSchema() {
   const schemas = await gw.schemas();
   const names = new Set((Array.isArray(schemas) ? schemas : []).map((s) => s.name));
@@ -88,6 +120,12 @@ export async function initSchema() {
   const r = missing.length ? await gw.batch(missing, ['42710']) : { results: [] };
   const bad = r.results.find((x) => !x.ok);
   if (bad) throw new Error(`Error creando catálogo del sistema: ${bad.error}`);
+  // Migración: tokens SHA-1 de contraseña para los servidores host (versiones anteriores no tenían la columna)
+  const cols = await gw.columns('QSYS', 'USRPRF');
+  if (Array.isArray(cols) && !cols.some((c) => c.name === 'PWDTOKEN')) {
+    const r = await gw.sql(`ALTER TABLE QSYS.USRPRF ADD COLUMN PWDTOKEN VARCHAR(256) NOT NULL DEFAULT ''`);
+    if (r.error && r.sqlstate !== '42711') throw new Error(`QSYS.USRPRF: ${r.error}`);
+  }
   for (const [name, value, text] of SYSVALS) {
     const ex = await gw.rows(`SELECT NAME FROM QSYS.SYSVAL WHERE NAME = ?`, [name]);
     if (!ex.length) await gw.exec(`INSERT INTO QSYS.SYSVAL (NAME, SVALUE, TEXT) VALUES (?, ?, ?)`, [name, value, text]);
@@ -127,6 +165,8 @@ export async function deleteLibrary(lib) {
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ?`, [lib]);
+  // Entradas de las colas de datos de la biblioteca (QSYS.DTAQE existe desde el IPL)
+  await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ?`, [lib]);
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB'`, [lib]);
 }
 export async function clearLibrary(lib) {
@@ -160,12 +200,27 @@ export async function putObject(lib, name, type, attr, text, data, owner = 'QSEC
 export async function deleteObject(lib, name, type) {
   const o = await gw.rows(`SELECT ATTR FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
   if (!o.length) throw new CLError('CPF2105', name, lib, type);
-  if (type === '*FILE' && ['PF', 'LF', 'PF-DTA'].includes(o[0].ATTR)) await gw.exec(`DROP TABLE ${lib}.${name}`).catch(() => {});
+  if (type === '*FILE' && ['PF', 'PF-DTA'].includes(o[0].ATTR)) {
+    // Como en IBM i, no se puede borrar un físico con lógicos que dependen de él
+    const deps = await dependentLogicals(lib, name);
+    if (deps.length) throw new CLError('CPF3220', name, lib, deps[0].NAME, deps[0].LIB);
+    await gw.exec(`DROP TABLE ${lib}.${name}`).catch(() => {});
+  }
+  if (type === '*FILE' && o[0].ATTR === 'LF') await gw.exec(`DROP VIEW ${lib}.${name}`).catch(() => {});
   if (type === '*FILE' && o[0].ATTR === 'PF-SRC') {
     await gw.exec(`DELETE FROM QSYS.SOURCE WHERE LIB = ? AND SRCF = ?`, [lib, name]);
     await gw.exec(`DELETE FROM QSYS.MEMBERS WHERE LIB = ? AND SRCF = ?`, [lib, name]);
   }
+  if (type === '*DTAQ') await gw.sql(`DELETE FROM QSYS.DTAQE WHERE LIB = ? AND NAME = ?`, [lib, name]);
   await gw.exec(`DELETE FROM QSYS.OBJECTS WHERE LIB = ? AND NAME = ? AND TYPE = ?`, [lib, name, type]);
+}
+
+/** Archivos lógicos basados en un físico (DSPDBR). */
+export async function dependentLogicals(lib, name) {
+  const rows = await gw.rows(`SELECT LIB, NAME, DATA FROM QSYS.OBJECTS WHERE TYPE = '*FILE' AND ATTR = 'LF'`, []);
+  return rows.filter((r) => {
+    try { return (JSON.parse(r.DATA).pfiles || []).some((p) => p.file === name && (p.lib || r.LIB) === lib); } catch { return false; }
+  });
 }
 
 export async function resolveObject(name, type, lib, libl) {
@@ -231,12 +286,13 @@ export async function writeMember(lib, file, mbr, lines) {
 }
 
 // ---------- Spool ----------
-export async function createSpool(job, name, lines, { usrdta = '', outq = 'PRT01' } = {}) {
+export async function createSpool(job, name, lines, { usrdta = '', outq = 'PRT01', pageLen = 60, hold = false } = {}) {
+  outq = outq || 'PRT01';
   const id = await nextId('SPLF');
   job.spoolSeq = (job.spoolSeq || 0) + 1;
-  const pages = Math.max(1, Math.ceil(lines.length / 60));
+  const pages = Math.max(1, Math.ceil(lines.length / (pageLen || 60)));
   await gw.exec(`INSERT INTO QSYS.SPLF (ID, NAME, JOBNAME, JOBUSER, JOBNBR, SPLNBR, USRDTA, OUTQ, STATUS, PAGES, NLINES, CREATED, DATA)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'RDY', ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ${hold ? "'HLD'" : "'RDY'"}, ?, ?, ?, ?)`,
   [id, name.slice(0, 10), job.name, job.user, job.number, job.spoolSeq, usrdta.slice(0, 10), outq, pages, lines.length, now(), lines.join('\n')]);
   return id;
 }
@@ -277,8 +333,8 @@ export async function getUser(name) {
 export async function listUsers() { return gw.rows(`SELECT NAME, USRCLS, TEXT, STATUS, CURLIB, LASTSIGN FROM QSYS.USRPRF ORDER BY NAME`); }
 export async function createUser({ name, password, usrcls = '*USER', text = '', curlib = '*CRTDFT', inlmnu = 'MAIN', inlpgm = '*NONE' }) {
   if (await getUser(name)) throw new CLError('CPF2214', name, 'QSYS', '*USRPRF');
-  await gw.exec(`INSERT INTO QSYS.USRPRF (NAME, PWDHASH, USRCLS, TEXT, CURLIB, INLMNU, INLPGM, STATUS, CREATED) VALUES (?, ?, ?, ?, ?, ?, ?, '*ENABLED', ?)`,
-    [name, password && password !== '*NONE' ? hashPassword(name, password) : '', usrcls, text, curlib, inlmnu, inlpgm, now()]);
+  await gw.exec(`INSERT INTO QSYS.USRPRF (NAME, PWDHASH, PWDTOKEN, USRCLS, TEXT, CURLIB, INLMNU, INLPGM, STATUS, CREATED) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '*ENABLED', ?)`,
+    [name, password && password !== '*NONE' ? hashPassword(name, password) : '', password && password !== '*NONE' ? passwordTokens(name, password) : '', usrcls, text, curlib, inlmnu, inlpgm, now()]);
   await putObject('QSYS', name, '*USRPRF', '', text, undefined, 'QSECOFR');
   await putObject('QUSRSYS', name, '*MSGQ', '', `Message queue for ${name}`, undefined, name);
 }

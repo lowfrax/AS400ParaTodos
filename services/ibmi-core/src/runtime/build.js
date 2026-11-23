@@ -5,11 +5,16 @@ import { CLError, msg, msgText } from '../messages.js';
 import { createJob, endJob, logJob, setStatus, qualifiedJob, sysDate, sysTime } from '../system.js';
 import { invalidateTables } from '../ctx.js';
 import { refreshMW } from '../mw.js';
+import { bindModules, importsOf } from './ile.js';
+
+// Nombres cualificados de una lista (LIB/NOMBRE o NOMBRE)
+export const qualList = (v) => (Array.isArray(v) ? v : String(v || '').split(/\s+/)).map((x) => String(x).replace(/[()']/g, '').trim()).filter((x) => x && x !== '*NONE')
+  .map((x) => { const [l, n] = x.includes('/') ? x.split('/') : [null, x]; return { lib: l && l !== '*LIBL' ? l.toUpperCase() : null, name: n.toUpperCase() }; });
 
 const COMPILER = process.env.COMPILER_URL || 'http://localhost:5251';
 
-const SRC_FOR = { RPGLE: 'QRPGLESRC', SQLRPGLE: 'QRPGLESRC', CLLE: 'QCLLESRC', CLP: 'QCLSRC', PF: 'QDDSSRC', DSPF: 'QDDSSRC' };
-export const COMPILE_CMD = { RPGLE: 'CRTBNDRPG', SQLRPGLE: 'CRTSQLRPGI', RPG: 'CRTBNDRPG', CLLE: 'CRTBNDCL', CLP: 'CRTBNDCL', PF: 'CRTPF', DSPF: 'CRTDSPF' };
+const SRC_FOR = { RPGLE: 'QRPGLESRC', SQLRPGLE: 'QRPGLESRC', RPG: 'QRPGSRC', RPG38: 'QRPGSRC', RPG36: 'QS36SRC', CLLE: 'QCLLESRC', CLP: 'QCLSRC', PF: 'QDDSSRC', LF: 'QDDSSRC', DSPF: 'QDDSSRC', PRTF: 'QDDSSRC' };
+export const COMPILE_CMD = { RPGLE: 'CRTBNDRPG', SQLRPGLE: 'CRTSQLRPGI', RPG: 'CRTRPGPGM', RPG38: 'CRTRPGPGM', RPG36: 'CRTRPGPGM', CLLE: 'CRTBNDCL', CLP: 'CRTCLPGM', PF: 'CRTPF', LF: 'CRTLF', DSPF: 'CRTDSPF', PRTF: 'CRTPRTF' };
 
 /**
  * Compila un miembro fuente y crea el objeto.
@@ -19,10 +24,12 @@ export async function compileObject(ctx, o) {
   const objLib = ctx.resolveLib(o.obj.lib === '*LIBL' ? '*CURLIB' : o.obj.lib);
   const name = o.obj.obj;
   const srcfile = o.srcfile.obj || SRC_FOR[o.type] || 'QRPGLESRC';
-  const mbrName = !o.srcmbr || o.srcmbr === '*PGM' || o.srcmbr === '*FILE' || o.srcmbr === '*OBJ' ? name : o.srcmbr;
+  const mbrName = !o.srcmbr || o.srcmbr === '*PGM' || o.srcmbr === '*FILE' || o.srcmbr === '*OBJ' || o.srcmbr === '*MODULE' ? name : o.srcmbr;
   const mi = await findMember(gw, o.srcfile.lib === '*LIBL' ? null : ctx.resolveLib(o.srcfile.lib), srcfile, mbrName, ctx.libl);
   if (!mi) throw new CLError('CPF9815', mbrName, srcfile, o.srcfile.lib);
-  const type = (o.type || mi.TYPE || 'RPGLE').toUpperCase();
+  // CRTRPGPGM compila RPG/400 (RPG), RPG/38 y RPG II (RPG36) según el tipo del miembro
+  const opm = ['RPG', 'RPG38', 'RPG36'];
+  const type = (o.type === 'RPG' ? (opm.includes(String(mi.TYPE).toUpperCase()) ? mi.TYPE : 'RPG') : o.type || mi.TYPE || 'RPGLE').toUpperCase();
   const source = await readMember(gw, mi.LIB, srcfile, mbrName);
   const text = o.text && o.text !== '*SRCMBRTXT' ? o.text : mi.TEXT || '';
   // Como en IBM i, CRTPF comprueba antes de compilar si el archivo ya existe: CPF5813 (diagnóstico) + CPF7302 (escape).
@@ -41,7 +48,7 @@ export async function compileObject(ctx, o) {
   }
   await createSpool(ctx.job, name, r.listing.split('\n'), { usrdta: mbrName });
   for (const m of r.messages) if (m.sev >= 30) logJob(ctx.job, m.id, '*DIAG', `${m.text}${m.line ? ` (line ${m.line})` : ''}`, { sev: m.sev });
-  const isFile = type === 'PF' || type === 'DSPF';
+  const isFile = ['PF', 'LF', 'DSPF', 'PRTF'].includes(type);
   if (!r.ok) {
     if (isFile) throw new CLError('CPF7302', name, objLib);
     const sev = String(r.severity).padStart(2, '0');
@@ -69,10 +76,49 @@ export async function compileObject(ctx, o) {
     invalidateTables(objLib);
     return [msg('CPC7301', name, objLib)];
   }
+  if (type === 'LF') {
+    if (await findObject(gw, name, '*FILE', objLib, [])) throw new CLError('CPF7302', name, objLib);
+    const res = await gw.sql(r.object.data.sql);
+    if (res.error) throw new CLError('CPF9898', `Logical file ${name} not created: ${res.error}`);
+    const { sql, ...meta } = r.object.data;
+    await putObject(objLib, name, '*FILE', 'LF', text || meta.text, meta, ctx.job.user);
+    invalidateTables(objLib);
+    return [msg('CPC7301', name, objLib)];
+  }
+  if (type === 'PRTF') {
+    if (await findObject(gw, name, '*FILE', objLib, [])) {
+      if (!o.replace) throw new CLError('CPF7302', name, objLib);
+      await deleteObject(objLib, name, '*FILE');
+    }
+    await putObject(objLib, name, '*FILE', 'PRTF', text, { ...r.object.data, pagesize: o.pagesize || [66, 132], ovrflw: o.ovrflw || 60 }, ctx.job.user);
+    return [msg('CPC7301', name, objLib)];
+  }
+  // ILE: CRTRPGMOD crea un *MODULE; CRTBNDRPG enlaza las importaciones del módulo (BNDDIR de CTL-OPT o del mandato)
+  if (o.module && r.object.data && r.object.data.kind === 'RPG') {
+    await putObject(objLib, name, '*MODULE', r.object.attr, text, { kind: 'RPG', ir: r.object.data.ir, module: true }, ctx.job.user);
+    const dm = new Date();
+    return [{ id: 'RNS9305', text: `Module ${name} placed in library ${objLib}. ${String(r.severity).padStart(2, '0')} highest severity. Created on ${sysDate(dm)} at ${sysTime(dm)}.`, sev: 0 }];
+  }
+  if (r.object.data && r.object.data.kind === 'RPG') {
+    const ir = r.object.data.ir;
+    if (o.commit && !['*NONE', '*NC'].includes(String(o.commit).toUpperCase())) ir.$commit = String(o.commit).toUpperCase();
+    if (ir.ctl && ir.ctl.NOMAIN) {
+      logJob(ctx.job, 'RNF0143', '*DIAG', `Module ${name} has no main procedure (NOMAIN); use CRTRPGMOD and CRTSRVPGM.`, { sev: 30 });
+      throw new CLError('CPF5D0B', `Program entry procedure module not found; program ${name} not created in library ${objLib}.`);
+    }
+    const bnddir = [...qualList((ir.ctl && ir.ctl.BNDDIR) || []), ...qualList(o.bnddir || [])];
+    if (importsOf(ir).length || bnddir.length) {
+      const res = await bindModules(ctx, { modules: [{ name, lib: objLib, ir }], bnddir, bndsrvpgm: qualList(o.bndsrvpgm || []), self: { lib: objLib, name } });
+      ir.$bind = res.bind.filter((b) => !(b.kind === 'module' && b.name === name));
+      const extra = res.modules.filter((m) => m.name !== name);
+      if (extra.length) { r.object.data.modules = extra.map((m) => ({ name: m.name, lib: m.lib, ir: m.ir })); r.object.data.entmod = name; }
+    }
+  }
   await putObject(objLib, name, r.object.type, r.object.attr, text, r.object.data, ctx.job.user);
   // Las activaciones en caché del programa anterior dejan de ser válidas.
   for (const [k] of ctx.job.activations) if (k.endsWith(`/${name}`)) ctx.job.activations.delete(k);
   if (type === 'DSPF') return [msg('CPC7301', name, objLib)];
+  if (type === 'PRTF') return [msg('CPC7301', name, objLib)];
   const d = new Date();
   if (type.startsWith('CL')) return [{ id: 'CPC0904', text: `Program ${name} created in library ${objLib}.`, sev: 0 }];
   return [{ id: 'RNS9304', text: `Program ${name} placed in library ${objLib}. ${String(r.severity).padStart(2, '0')} highest severity. Created on ${sysDate(d)} at ${sysTime(d)}.`, sev: 0 }];

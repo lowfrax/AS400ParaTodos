@@ -88,6 +88,7 @@ export const MENUS = {
       [3, 'Interactive SQL', 'STRSQL'],
       [4, 'Display physical file member', '?DSPPFM'],
       [5, 'Display file field description', '?DSPFFD'],
+      [6, 'Screen design aid (SDA)', 'STRSDA'],
     ],
     bottomOptions: [[90, 'Sign off', 'SIGNOFF']],
   },

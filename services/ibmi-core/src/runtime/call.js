@@ -7,10 +7,13 @@ import { setStatus, logJob, qualifiedJob, sysDate, sysTime } from '../system.js'
 import { Panel } from '../panel.js';
 import { displayFormat } from './dspf.js';
 import { runCl } from './clrun.js';
+import { callSystemProc, systemProgram } from './sysapi.js';
+import { resolveBound } from './ile.js';
+import { enterCall, leaveCall, overrideFor } from './overrides.js';
 
 const programCache = new Map(); // `${lib}/${name}` -> {changed, data}
 
-async function loadProgram(ctx, name, lib) {
+export async function loadProgram(ctx, name, lib) {
   const o = await findObject(gw, name, '*PGM', lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(lib), ctx.libl);
   if (!o) throw new CLError('CPF9811', name, lib || '*LIBL');
   const key = `${o.LIB}/${name}`;
@@ -29,21 +32,37 @@ export async function callProgram(ctx, name, lib, refs = []) {
     await commandEntry(ctx);
     return [];
   }
+  // APIs del sistema (QSNDDTAQ, QRCVDTAQ, QCMDEXC, QSYS2…): programas *PGM de QSYS implementados en el núcleo.
+  const api = systemProgram(name);
+  if (api && (!lib || lib === '*LIBL' || lib === 'QSYS')) {
+    await api(ctx, refs);
+    return [];
+  }
   const { o, data, key } = await loadProgram(ctx, name, lib);
   const job = ctx.job;
   const prevFn = job.function;
   setStatus(job, 'RUN', `PGM-${name}`);
   ctx.pgmMsgs = [];
+  enterCall(job);
   try {
     if (data.kind === 'CL') {
       await runCl(ctx, name, data.ir, refs);
     } else {
-      await runRpg(ctx, o, name, key, data.ir, refs);
+      await runRpg(ctx, { ...o, $modules: data.modules || [], $entry: data.entmod }, name, key, data.ir, refs);
     }
   } finally {
     job.function = prevFn;
+    // Las alteraciones (OVRDBF/OVRPRTF) del nivel de llamada del programa terminan con él
+    leaveCall(job);
   }
   return ctx.pgmMsgs;
+}
+
+// OVRDBF POSITION(*END|*START): posición inicial del archivo abierto
+function withPosition(desc, f) {
+  const pos = desc.override && desc.override.position ? String(desc.override.position).toUpperCase() : '';
+  if (pos.startsWith('*END')) { f.lower = { none: true }; f.upper = { all: true }; f.idx = Infinity; }
+  return f;
 }
 
 function makeHost(ctx, pgmName) {
@@ -52,8 +71,39 @@ function makeHost(ctx, pgmName) {
   const printers = [];
   const host = {
     user: job.user,
-    describeFile: (n) => describeFile(gw, n, ctx.libl).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); }),
-    openDisk: (desc) => new DiskFile({ name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys, sql: (t, p) => gw.sql(t, p, { client }) }),
+    // OVRDBF FILE(n) TOFILE(lib/arch): el programa abre el archivo alterado
+    describeFile: (n) => {
+      const ov = overrideFor(job, 'DB', String(n).replace(/^.*\//, ''));
+      const target = ov && ov.tofile && ov.tofile !== '*FILE' ? ov.tofile : n;
+      return describeFile(gw, target, ctx.libl).then((d) => (ov ? { ...d, override: ov } : d)).catch((e) => { throw new RpgError('01011', 'RNX1011', `Undefined record type or file ${n} not found: ${e.message}`); });
+    },
+    openDisk: (desc) => withPosition(desc, new DiskFile({
+      name: desc.table, schema: desc.schema, table: desc.table, fields: desc.fields, keys: desc.keys, keyDesc: desc.keyDesc, rrn: desc.rrn,
+      sql: async (t, p) => { await ctx.ensureCommit(); return gw.sql(t, p, { client, tx: job.cmt?.tx }); },
+    })),
+    // SET OPTION COMMIT / COMMIT / ROLLBACK (SQL) y COMMIT / ROLBK (RPG)
+    async sqlControl(verb, o = {}) {
+      try {
+        if (verb === 'OPTION') {
+          if (o.commit && o.commit !== '*NONE' && !job.cmt) { await ctx.startCommit(o.commit); job.cmt.auto = true; }
+          return null;
+        }
+        const r = verb === 'COMMIT' ? await ctx.commit(o) : await ctx.rollback(o);
+        return r && r.error ? r : null;
+      } catch (e) { return { error: e.message, sqlstate: e.sqlstate || '2D521', sqlcode: e.sqlcode ?? -751 }; }
+    },
+    callProc: (n, args, places) => callSystemProc(ctx, n, args, places),
+    // ILE: símbolos de otros módulos del programa y de los programas de servicio enlazados
+    resolveBound: (sym, prog) => resolveBound(ctx, prog, sym, (ir, nm) => new RpgProgram(ir, makeHost(ctx, nm))),
+    // Archivo de impresora descrito externamente (CRTPRTF); null si no existe o no tiene DDS
+    async describePrinter(n) {
+      const ovp = overrideFor(job, 'PRT', String(n).replace(/^.*\//, ''));
+      if (ovp && ovp.tofile) n = ovp.tofile;
+      const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
+      const fo = await findObject(gw, nm, '*FILE', lib, ctx.libl);
+      const d = fo ? await objectData(gw, fo.LIB, nm, '*FILE') : null;
+      return d && d.kind === 'PRTF' ? d : null;
+    },
     async describeDisplay(n) {
       const [lib, nm] = n.includes('/') ? n.split('/') : ['*LIBL', n];
       const fo = await findObject(gw, nm, '*FILE', lib, ctx.libl);
@@ -78,15 +128,24 @@ function makeHost(ctx, pgmName) {
     sql: (t, p) => ctx.sql(t, p),
     callProgram: async (n, r) => {
       try { await callProgram(ctx, n, '*LIBL', r); } catch (e) {
+        // Un *ESCAPE enviado a la entrada anterior de la pila (QMHSNDPM '*' 1) termina este programa y llega a su llamador
+        if (e instanceof CLError && e.escapeToCaller) { e.escapeToCaller = false; throw e; }
         if (e instanceof CLError) throw new RpgError('00211', 'RNX0211', `Error calling program ${n}: ${e.message}`);
         throw e;
       }
     },
-    openPrinter(name, len) {
+    openPrinter(name, len, { pageLen } = {}) {
+      // OVRPRTF: cola de salida, nombre del archivo en spool, datos de usuario, retención y longitud de página
+      const ov = overrideFor(job, 'PRT', name) || {};
+      if (ov.pagelen) pageLen = ov.pagelen;
       const lines = [];
       const h = {
         write: (line) => lines.push(String(line).slice(0, len).replace(/\s+$/, '')),
-        close: async () => { if (lines.length) { await createSpool(job, name, lines.splice(0), { usrdta: pgmName }); } },
+        close: async () => {
+          if (!lines.length) return;
+          const data = lines.splice(0);
+          for (let c = 0; c < (ov.copies || 1); c++) await createSpool(job, ov.splfname || name, data, { usrdta: ov.usrdta || pgmName, pageLen, outq: ov.outq, hold: ov.hold });
+        },
       };
       printers.push(h);
       return h;
@@ -99,11 +158,25 @@ function makeHost(ctx, pgmName) {
 
 async function runRpg(ctx, o, name, key, ir, refs) {
   const job = ctx.job;
+  // CRTSQLRPGI COMMIT(*CHG|*CS|…): el programa trabaja bajo control de compromiso, como con SET OPTION COMMIT
+  if (ir.$commit && !job.cmt) { await ctx.startCommit(ir.$commit === '*UR' ? '*CHG' : ir.$commit === '*RS' ? '*ALL' : ir.$commit); job.cmt.auto = true; }
   let entry = job.activations.get(key);
   let prog;
   if (entry) prog = entry;
   else {
     prog = new RpgProgram(JSON.parse(JSON.stringify(ir)), makeHost(ctx, name));
+    // Programa ILE con varios módulos (CRTPGM): cada módulo tiene su propio almacenamiento estático
+    if (o && o.$modules && o.$modules.length) {
+      const unit = { modules: new Map([[o.$entry || name, prog]]) };
+      prog.$unit = unit;
+      for (const m of o.$modules) {
+        const mir = JSON.parse(JSON.stringify(m.ir));
+        mir.$bind = ir.$bind || [];
+        const mp = new RpgProgram(mir, makeHost(ctx, name));
+        mp.$unit = unit;
+        unit.modules.set(m.name, mp);
+      }
+    }
   }
   try {
     const r = await prog.call(refs);

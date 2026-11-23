@@ -5,6 +5,11 @@
   "type": "module",
   "description": "Núcleo del sistema IBM i: sesiones 5250, trabajos, CL, ejecución de programas RPG/CL",
   "main": "src/server.js",
-  "scripts": { "start": "node src/server.js" },
-  "dependencies": { "ws": "^8.18.0" }
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "ssh2": "^1.17.0",
+    "ws": "^8.18.0"
+  }
 }

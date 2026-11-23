@@ -43,9 +43,15 @@ def('SIGNOFF', 'Sign Off', [P('LOG', 'Job log', 'char', 7, { dft: '*NOLIST', cho
   if (a.LOG === '*LIST') await obj.createSpool(ctx.job, 'QPJOBLOG', ctx.job.joblog.map((e) => `${(e.id || '').padEnd(8)} ${e.type.padEnd(8)} ${e.text}`), { usrdta: ctx.job.name, outq: 'QEZJOBLOG' });
   throw new SignOff();
 }, I);
-def('GO', 'Go to Menu', [P('MENU', 'Menu', 'name', 10, { req: true, choices: 'Name, *ALL' })], async (ctx, a) => {
-  const r = await goMenu(ctx, a.MENU);
-  return null && r;
+// GO: menús del sistema (en QSYS) o menús de usuario (*MENU creados con SDA / CRTMNU) en la lista de bibliotecas
+def('GO', 'Go to Menu', [P('MENU', 'Menu', 'qual', 10, { req: true, choices: 'Name, *ALL' })], async (ctx, a) => {
+  const q = typeof a.MENU === 'string' ? { lib: '*LIBL', obj: a.MENU } : a.MENU;
+  const name = String(q.obj).toUpperCase();
+  const { MENUS } = await import('../screens/menus.js');
+  if (MENUS[name] && (!q.lib || q.lib === '*LIBL' || q.lib === 'QSYS')) { await goMenu(ctx, name); return null; }
+  const { goUserMenu } = await import('./sda.js');
+  if (await goUserMenu(ctx, q)) return null;
+  throw new CLError('CPF6AC7', `Menu ${name} in library ${q.lib || '*LIBL'} not found.`);
 }, I);
 def('WRKACTJOB', 'Work with Active Jobs', [P('SBS', 'Subsystem', 'name', 10, { dft: '*ALL' })], async (ctx, a) => { await wrkactjob(ctx, a.SBS); }, I);
 def('WRKSYSSTS', 'Work with System Status', [], async (ctx) => { await wrksyssts(ctx); }, I);
@@ -76,7 +82,17 @@ def('DSPJOB', 'Display Job', [], async (ctx) => { await dspjoblog(ctx); }, I);
 def('WRKJOB', 'Work with Job', [], async (ctx) => { await dspjoblog(ctx); }, I);
 
 // ---------- Lista de bibliotecas ----------
-def('DSPLIBL', 'Display Library List', [P('OUTPUT', 'Output', 'char', 6, { dft: '*' })], async (ctx) => { await dsplibl(ctx); }, I);
+// OUTPUT(*) en un trabajo por lotes (o OUTPUT(*PRINT)) imprime la lista en QPRTLIBL, como en IBM i; QSH 'system' la ve en stdout
+def('DSPLIBL', 'Display Library List', [P('OUTPUT', 'Output', 'char', 6, { dft: '*', choices: '*, *PRINT' })], async (ctx, a) => {
+  if (ctx.interactive && a.OUTPUT !== '*PRINT') { await dsplibl(ctx); return null; }
+  const text = new Map((await obj.libraries()).map((l) => [l.NAME, l.TEXT]));
+  const sys = ['QSYS', 'QSYS2', 'QHLPSYS', 'QUSRSYS'];
+  const lines = ['                                     Library List', '', '  Library     Type      Text Description',
+    ...ctx.libl.map((l) => `  ${l.padEnd(10)}  ${(sys.includes(l) ? 'SYS' : l === ctx.job.curlib ? 'CUR' : 'USR').padEnd(8)}  ${text.get(l) || ''}`.replace(/\s+$/, '')),
+    '', '                         * * * * *  E N D  O F  L I S T I N G  * * * * *'];
+  await obj.createSpool(ctx.job, 'QPRTLIBL', lines, { usrdta: 'DSPLIBL' });
+  return { text: lines.join('\n') };
+});
 def('CHGCURLIB', 'Change Current Library', [P('CURLIB', 'Current library', 'name', 10, { req: true, choices: 'Name, *CRTDFT' })], async (ctx, a) => {
   if (a.CURLIB === '*CRTDFT') ctx.job.curlib = null;
   else { await requireLib(ctx, a.CURLIB); ctx.job.curlib = a.CURLIB; }
@@ -193,7 +209,7 @@ def('RMVM', 'Remove Member', [LIBQ('FILE', 'Database file'), P('MBR', 'Member', 
 def('STRSEU', 'Start Source Entry Utility', [
   LIBQ('SRCFILE', 'Source file', { req: false, dft: 'QRPGLESRC' }),
   P('SRCMBR', 'Source member', 'name', 10, { req: true }),
-  P('TYPE', 'Source type', 'name', 10, { dft: '*SAME', choices: 'Name, *SAME, RPGLE, CLLE, PF, DSPF' }),
+  P('TYPE', 'Source type', 'name', 10, { dft: '*SAME', choices: 'Name, *SAME, RPGLE, SQLRPGLE, RPG, RPG38, RPG36, CLLE, CLP, PF, LF, DSPF, PRTF' }),
   P('OPTION', 'Option', 'char', 1, { dft: '2', choices: '2=Edit, 5=Browse' }),
   P('TEXT', "Text 'description'", 'text', 50, { dft: '*BLANK' }),
 ], async (ctx, a) => {
@@ -201,7 +217,7 @@ def('STRSEU', 'Start Source Entry Utility', [
   let type = a.TYPE;
   if (type === '*SAME') {
     const m = await obj.findMember(gw, lib, a.SRCFILE.obj, a.SRCMBR, []);
-    type = m ? m.TYPE : ({ QRPGLESRC: 'RPGLE', QCLLESRC: 'CLLE', QCLSRC: 'CLP', QDDSSRC: 'PF', QSQLSRC: 'SQL' }[a.SRCFILE.obj] || 'TXT');
+    type = m ? m.TYPE : ({ QRPGLESRC: 'RPGLE', QRPGSRC: 'RPG', QS36SRC: 'RPG36', QCLLESRC: 'CLLE', QCLSRC: 'CLP', QDDSSRC: 'PF', QSQLSRC: 'SQL' }[a.SRCFILE.obj] || 'TXT');
   }
   return seu(ctx, { lib, file: a.SRCFILE.obj, mbr: a.SRCMBR, type, mode: a.OPTION === '5' ? 'browse' : 'edit', text: textVal(a.TEXT) });
 }, I);
@@ -218,19 +234,94 @@ def('WRKMBRPDM', 'Work with Members using PDM', [
 const compileDef = (name, title, type, kw = 'PGM', srcDft = 'QRPGLESRC', extra = []) => def(name, title, [
   LIBQ(kw, kw === 'FILE' ? 'File' : kw === 'OBJ' ? 'Object' : 'Program', { lib: '*CURLIB', libChoices: 'Name, *CURLIB' }),
   LIBQ('SRCFILE', 'Source file', { req: false, dft: srcDft }),
-  P('SRCMBR', 'Source member', 'name', 10, { dft: kw === 'FILE' ? '*FILE' : '*PGM', choices: 'Name, *PGM' }),
+  P('SRCMBR', 'Source member', 'name', 10, { dft: kw === 'FILE' ? '*FILE' : kw === 'MODULE' ? '*MODULE' : '*PGM', choices: 'Name, *PGM' }),
   P('TEXT', "Text 'description'", 'text', 50, { dft: '*SRCMBRTXT' }),
   ...extra,
 ], async (ctx, a) => compileObject(ctx, {
   type: type || null, obj: a[kw], srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE === '*YES',
+  module: name === 'CRTRPGMOD' || (name === 'CRTSQLRPGI' && a.OBJTYPE === '*MODULE'), bnddir: a.BNDDIR, bndsrvpgm: a.BNDSRVPGM, commit: a.COMMIT,
 }));
-compileDef('CRTBNDRPG', 'Create Bound RPG Program', 'RPGLE');
-compileDef('CRTRPGPGM', 'Create RPG Program', 'RPGLE', 'PGM', 'QRPGSRC');
-compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ');
+const BND = [
+  P('DFTACTGRP', 'Default activation group', 'char', 4, { dft: '*YES', choices: '*YES, *NO' }),
+  P('ACTGRP', 'Activation group', 'name', 10, { dft: '*STGMDL', choices: 'Name, *STGMDL, *NEW, *CALLER' }),
+  P('BNDDIR', 'Binding directory', 'list', 60, { dft: '*NONE' }),
+];
+compileDef('CRTBNDRPG', 'Create Bound RPG Program', 'RPGLE', 'PGM', 'QRPGLESRC', BND);
+compileDef('CRTRPGMOD', 'Create RPG Module', 'RPGLE', 'MODULE', 'QRPGLESRC');
+compileDef('CRTRPGPGM', 'Create RPG Program', 'RPG', 'PGM', 'QRPGSRC');
+// COMMIT: en IBM i el valor por omisión es *CHG, que sobre tablas sin diario da SQL7008; aquí las tablas no se registran
+// por diario, así que el valor por omisión es *NONE y *CHG/*CS/*ALL/*RR activan el control de compromiso como SET OPTION.
+compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ', 'QRPGLESRC', [P('OBJTYPE', 'Compile type', 'name', 10, { dft: '*PGM', choices: '*PGM, *MODULE, *SRVPGM' }),
+  P('COMMIT', 'Commitment control', 'name', 6, { dft: '*NONE', choices: '*CHG, *UR, *CS, *ALL, *RS, *RR, *NONE, *NC' }), ...BND]);
 compileDef('CRTBNDCL', 'Create Bound CL Program', 'CLLE', 'PGM', 'QCLLESRC');
+
+// CVTRPGSRC: RPG III / RPG/400 / RPG II → ILE RPG (RPG IV) en columnas fijas
+def('CVTRPGSRC', 'Convert RPG Source', [
+  LIBQ('FROMFILE', 'From file', { dft: 'QRPGSRC' }),
+  P('FROMMBR', 'From member', 'name', 10, { req: true, choices: 'Name, generic*, *ALL' }),
+  LIBQ('TOFILE', 'To file', { req: false, dft: 'QRPGLESRC', lib: '*FROMLIB' }),
+  P('TOMBR', 'To member', 'name', 10, { dft: '*FROMMBR', choices: 'Name, *FROMMBR' }),
+  P('EXPCPY', 'Expand copy member', 'char', 4, { dft: '*NO', choices: '*NO, *YES' }),
+  P('LOGFILE', 'Log file', 'name', 10, { dft: '*NONE' }),
+], async (ctx, a) => {
+  const { cvtrpgsrc } = await import('../../../../shared/rpg/cvtrpgsrc.js');
+  const fromLib = await resolveLibOf(ctx, a.FROMFILE, '*FILE');
+  const toLib = !a.TOFILE.lib || a.TOFILE.lib === '*FROMLIB' || a.TOFILE.lib === '*LIBL' ? fromLib : ctx.resolveLib(a.TOFILE.lib);
+  const toFile = a.TOFILE.obj || 'QRPGLESRC';
+  if (!(await obj.findObject(gw, toFile, '*FILE', toLib, []))) throw new CLError('CPF9812', toFile, toLib);
+  const all = await obj.listMembers(fromLib, a.FROMFILE.obj);
+  const pat = String(a.FROMMBR).toUpperCase();
+  const mbrs = pat === '*ALL' ? all : pat.endsWith('*') ? all.filter((m) => m.MBR.startsWith(pat.slice(0, -1))) : all.filter((m) => m.MBR === pat);
+  if (!mbrs.length) throw new CLError('CPF9815', a.FROMMBR, a.FROMFILE.obj, fromLib);
+  const TYPE_MAP = { RPG: 'RPGLE', RPG38: 'RPGLE', RPG36: 'RPGLE', RPT: 'RPGLE', RPT38: 'RPGLE', SQLRPG: 'SQLRPGLE', '': 'RPGLE' };
+  let done = 0;
+  for (const m of mbrs) {
+    const type = String(m.TYPE || '').toUpperCase();
+    if (!(type in TYPE_MAP)) { logJob(ctx.job, 'CPF5D03', '*DIAG', `Member ${m.MBR} not converted: source type ${type} is not RPG.`, { sev: 10 }); continue; }
+    const toMbr = a.TOMBR === '*FROMMBR' || !a.TOMBR ? m.MBR : a.TOMBR;
+    const src = await obj.readMember(gw, fromLib, a.FROMFILE.obj, m.MBR);
+    const { lines } = cvtrpgsrc(src.map((x) => x.text), { name: m.MBR });
+    const existing = await obj.listMembers(toLib, toFile);
+    if (existing.some((x) => x.MBR === toMbr)) throw new CLError('CPF3213', toMbr, toFile, toLib);
+    await obj.addMember(toLib, toFile, toMbr, TYPE_MAP[type], m.TEXT || '');
+    await obj.writeMember(toLib, toFile, toMbr, lines.map((t, i) => ({ seq: (i + 1) * 100, dat: 0, text: t })));
+    logJob(ctx.job, '', '*INFO', `Member ${m.MBR} converted to ${toLib}/${toFile}(${toMbr}).`);
+    done++;
+  }
+  return { text: `${done} members converted out of ${mbrs.length} attempted.` };
+});
 compileDef('CRTCLPGM', 'Create CL Program', 'CLP', 'PGM', 'QCLSRC');
 compileDef('CRTPF', 'Create Physical File', 'PF', 'FILE', 'QDDSSRC', [P('REPLACE', 'Replace file', 'char', 4, { dft: '*NO', choices: '*NO, *YES' })]);
 compileDef('CRTDSPF', 'Create Display File', 'DSPF', 'FILE', 'QDDSSRC');
+compileDef('CRTLF', 'Create Logical File', 'LF', 'FILE', 'QDDSSRC');
+def('CRTPRTF', 'Create Printer File', [
+  LIBQ('FILE', 'File', { lib: '*CURLIB', libChoices: 'Name, *CURLIB' }),
+  LIBQ('SRCFILE', 'Source file', { req: false, dft: 'QDDSSRC' }),
+  P('SRCMBR', 'Source member', 'name', 10, { dft: '*FILE', choices: 'Name, *FILE' }),
+  P('PAGESIZE', 'Page size (length width)', 'list', 12, { dft: '66 132' }),
+  P('OVRFLW', 'Overflow line number', 'int', 3, { dft: '60' }),
+  P('REPLACE', 'Replace file', 'char', 4, { dft: '*YES', choices: '*YES, *NO' }),
+  TEXT,
+], async (ctx, a) => {
+  const ps = String(a.PAGESIZE || '66 132').replace(/[()]/g, ' ').trim().split(/\s+/).map(Number);
+  return compileObject(ctx, {
+    type: 'PRTF', obj: a.FILE, srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE !== '*NO',
+    pagesize: [ps[0] || 66, ps[1] || 132], ovrflw: Number(a.OVRFLW || 60),
+  });
+});
+def('DSPDBR', 'Display Database Relations', [LIBQ('FILE', 'File')], async (ctx, a) => {
+  const lib = await resolveLibOf(ctx, a.FILE, '*FILE');
+  const deps = await obj.dependentLogicals(lib, a.FILE.obj);
+  const lines = [`File  . . . . . . . . . . :   ${a.FILE.obj}`, `  Library . . . . . . . . :   ${lib}`, `Number of dependent files :   ${deps.length}`, '', 'Dependent File    Library     Dependency', ...deps.map((d) => `${d.NAME.padEnd(18)}${d.LIB.padEnd(12)}Data`)];
+  if (!ctx.interactive) return { text: lines.join('\n') };
+  const p = new Panel({ fn: 'CMD-DSPDBR', keys: ['F3', 'F12'] });
+  p.title('Display Data Base Relations');
+  p.sysName();
+  lines.forEach((l, i) => p.text(3 + i, 2, l, i < 3 ? 'g' : 'w'));
+  p.fkeys('F3=Exit   F12=Cancel');
+  await ctx.display(p);
+  return null;
+});
 
 // ---------- Ejecución de programas y trabajos ----------
 def('CALL', 'Call Program', [LIBQ('PGM', 'Program'), P('PARM', 'Parameters', 'list', 60, { lc: true })], async (ctx, a, info) => {
@@ -371,7 +462,7 @@ def('CHGUSRPRF', 'Change User Profile', [
   if (!isSecofr(ctx) && a.USRPRF !== ctx.job.user) throw new CLError('CPF9898', 'Not authorized to change user profile.');
   if (!(await obj.getUser(a.USRPRF))) throw new CLError('CPF2204', a.USRPRF);
   const f = {};
-  if (a.PASSWORD !== '*SAME') f.PWDHASH = obj.hashPassword(a.USRPRF, a.PASSWORD);
+  if (a.PASSWORD !== '*SAME') { f.PWDHASH = obj.hashPassword(a.USRPRF, a.PASSWORD); f.PWDTOKEN = obj.passwordTokens(a.USRPRF, a.PASSWORD); }
   if (a.STATUS !== '*SAME') { f.STATUS = a.STATUS; if (a.STATUS === '*ENABLED') f.INVALID = 0; }
   for (const k of ['CURLIB', 'INLMNU', 'INLPGM', 'TEXT']) if (a[k] !== '*SAME') f[k] = a[k];
   await obj.updateUser(a.USRPRF, f);
@@ -397,7 +488,7 @@ def('CHGPWD', 'Change Password', [], async (ctx) => {
   const u = await obj.getUser(ctx.job.user);
   if (u.PWDHASH !== obj.hashPassword(ctx.job.user, r.fields.CUR.trim())) throw new CLError('CPF2362', 'Password not correct.');
   if (!r.fields.NEW.trim() || r.fields.NEW.trim() !== r.fields.VER.trim()) throw new CLError('CPF2363', 'New password and verify password do not match.');
-  await obj.updateUser(ctx.job.user, { PWDHASH: obj.hashPassword(ctx.job.user, r.fields.NEW.trim()) });
+  await obj.updateUser(ctx.job.user, { PWDHASH: obj.hashPassword(ctx.job.user, r.fields.NEW.trim()), PWDTOKEN: obj.passwordTokens(ctx.job.user, r.fields.NEW.trim()) });
   return msg('CPC2604');
 }, I);
 def('DLTUSRPRF', 'Delete User Profile', [P('USRPRF', 'User profile', 'name', 10, { req: true })], async (ctx, a) => {
@@ -428,11 +519,6 @@ def('CHGSYSVAL', 'Change System Value', [P('SYSVAL', 'System value', 'name', 10,
 });
 
 // ---------- Mensajes de programa (también como mandato interactivo) ----------
-def('SNDPGMMSG', 'Send Program Message', [P('MSG', 'Message text', 'text', 256, { req: true, promptLen: 120 }), P('MSGTYPE', 'Message type', 'char', 7, { dft: '*INFO' })], async (ctx, a) => {
-  logJob(ctx.job, '', a.MSGTYPE, a.MSG);
-  if (a.MSGTYPE === '*ESCAPE') throw new CLError('CPF9898', a.MSG);
-  return { text: a.MSG, sev: 0 };
-});
 def('PWRDWNSYS', 'Power Down System', [P('OPTION', 'How to end', 'char', 10, { dft: '*CNTRLD' })], async () => { throw new CLError('CPF1096'); });
 def('RTVJOBA', 'Retrieve Job Attributes', [], async () => { throw new CLError('CPD0031', 'RTVJOBA'); });
 

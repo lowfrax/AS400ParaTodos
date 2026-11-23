@@ -79,46 +79,101 @@ export function createDb2Driver(cfg) {
   }
 
   async function execOnce(sql, params = []) {
-    return withConn(async (conn) => {
-      let result;
-      // Las cadenas largas (IR de programas, spool) se enlazan como CLOB: VARCHAR admite como máximo 32672 bytes.
-      const bound = (params || []).map((p) => (typeof p === 'string' && Buffer.byteLength(p) > 32000 ? { ParamType: 'INPUT', DataType: 'CLOB', Data: p } : p));
-      try {
-        [result] = await conn.queryResult(sql, bound.length ? bound : null);
-      } catch (e) {
-        throw normalizeError(e);
-      }
-      if (!result) return { columns: [], rows: [], rowCount: 0 };
-      try {
-        const meta = result.getColumnMetadataSync() || [];
-        let rows = [];
-        let columns = [];
-        if (Array.isArray(meta) && meta.length) {
-          columns = meta.map((c) => ({
-            name: c.SQL_DESC_NAME,
-            type: String(c.SQL_DESC_TYPE_NAME || '').toUpperCase(),
-            precision: c.SQL_DESC_PRECISION,
-            scale: c.SQL_DESC_SCALE,
-            length: c.SQL_DESC_LENGTH,
-          }));
-          rows = result.fetchAllSync({ fetchMode: 3 }) || [];
-          if (!Array.isArray(rows)) throw normalizeError(rows);
-          const numIdx = columns.map((c, i) => (NUMERIC_TYPES.has(c.type) ? i : -1)).filter((i) => i >= 0);
-          for (const r of rows) {
-            for (const i of numIdx) if (typeof r[i] === 'string') r[i] = Number(r[i]);
-            for (let i = 0; i < r.length; i++) if (r[i] instanceof Date) r[i] = r[i].toISOString();
-          }
-        }
-        let rowCount = rows.length;
-        if (!columns.length) {
-          try { rowCount = result.getAffectedRowsSync(); } catch { rowCount = 0; }
-        }
-        return { columns, rows, rowCount };
-      } finally {
-        try { result.closeSync(); } catch { /* ignorar */ }
-      }
-    });
+    return withConn((conn) => runOn(conn, sql, params));
   }
+
+  // Ejecuta una sentencia sobre una conexión concreta (del pool o de una transacción).
+  async function runOn(conn, sql, params = []) {
+    let result;
+    // Las cadenas largas (IR de programas, spool) se enlazan como CLOB: VARCHAR admite como máximo 32672 bytes.
+    const bound = (params || []).map((p) => (typeof p === 'string' && Buffer.byteLength(p) > 32000 ? { ParamType: 'INPUT', DataType: 'CLOB', Data: p } : p));
+    try {
+      [result] = await conn.queryResult(sql, bound.length ? bound : null);
+    } catch (e) {
+      throw normalizeError(e);
+    }
+    if (!result) return { columns: [], rows: [], rowCount: 0 };
+    try {
+      const meta = result.getColumnMetadataSync() || [];
+      let rows = [];
+      let columns = [];
+      if (Array.isArray(meta) && meta.length) {
+        columns = meta.map((c) => ({
+          name: c.SQL_DESC_NAME,
+          type: String(c.SQL_DESC_TYPE_NAME || '').toUpperCase(),
+          // ibm_db devuelve SQL_DESC_PRECISION = 0: para DECIMAL/NUMERIC la precisión es el tamaño de visualización - 2 (signo y punto)
+          precision: c.SQL_DESC_PRECISION || (/^(DECIMAL|NUMERIC|DECFLOAT)$/i.test(String(c.SQL_DESC_TYPE_NAME)) ? Math.max(1, Number(c.SQL_DESC_DISPLAY_SIZE || 2) - 2) : Number(c.SQL_DESC_LENGTH || 0)),
+          scale: c.SQL_DESC_SCALE,
+          length: c.SQL_DESC_LENGTH,
+          nullable: c.SQL_DESC_NULLABLE === undefined ? true : c.SQL_DESC_NULLABLE !== 0,
+        }));
+        rows = result.fetchAllSync({ fetchMode: 3 }) || [];
+        if (!Array.isArray(rows)) throw normalizeError(rows);
+        const numIdx = columns.map((c, i) => (NUMERIC_TYPES.has(c.type) ? i : -1)).filter((i) => i >= 0);
+        for (const r of rows) {
+          for (const i of numIdx) if (typeof r[i] === 'string') r[i] = Number(r[i]);
+          for (let i = 0; i < r.length; i++) if (r[i] instanceof Date) r[i] = r[i].toISOString();
+        }
+      }
+      let rowCount = rows.length;
+      if (!columns.length) {
+        try { rowCount = result.getAffectedRowsSync(); } catch { rowCount = 0; }
+      }
+      return { columns, rows, rowCount };
+    } finally {
+      try { result.closeSync(); } catch { /* ignorar */ }
+    }
+  }
+
+  // ---- Transacciones (control de compromiso): una conexión dedicada con autocommit desactivado ----
+  const txs = new Map(); // id -> {conn, client, startedAt, lastUsed, stmts, isolation}
+  let txSeq = 0;
+  const ISOLATION = { '*NONE': 'UR', '*CHG': 'UR', '*UR': 'UR', '*CS': 'CS', '*ALL': 'RS', '*RS': 'RS', '*RR': 'RR' };
+  async function begin(client = '', isolation = '*CS') {
+    let conn;
+    try { conn = await ibmdb.open(connStr); } catch (e) { throw normalizeError(e); }
+    try {
+      conn.beginTransactionSync();
+      const iso = ISOLATION[String(isolation).toUpperCase()] || 'CS';
+      await runOn(conn, `SET CURRENT ISOLATION = ${iso}`).catch(() => {});
+    } catch (e) {
+      try { conn.closeSync(); } catch { /* ignorar */ }
+      throw normalizeError(e);
+    }
+    const id = `T${++txSeq}${Date.now().toString(36)}`;
+    txs.set(id, { conn, client, startedAt: Date.now(), lastUsed: Date.now(), stmts: 0, isolation });
+    return id;
+  }
+  function getTx(id) {
+    const t = txs.get(id);
+    if (!t) throw Object.assign(new Error(`Transaction ${id} not found or already ended.`), { sqlstate: '25000', sqlcode: -918 });
+    t.lastUsed = Date.now();
+    return t;
+  }
+  async function txExec(id, sql, params) {
+    const t = getTx(id);
+    t.stmts++;
+    try { return await runOn(t.conn, sql, params); } catch (e) {
+      if (isConnError(e)) { txs.delete(id); try { t.conn.closeSync(); } catch { /* ignorar */ } }
+      throw e;
+    }
+  }
+  async function endTx(id, commit, keep = false) {
+    const t = getTx(id);
+    try {
+      if (commit) t.conn.commitTransactionSync(); else t.conn.rollbackTransactionSync();
+    } catch (e) {
+      throw normalizeError(e);
+    } finally {
+      if (!keep) { txs.delete(id); try { t.conn.closeSync(); } catch { /* ignorar */ } } else t.stmts = 0;
+    }
+    return { ok: true, statements: t.stmts };
+  }
+  // Las transacciones abandonadas (cliente caído) se deshacen pasado TX_TIMEOUT, como hace IBM i al terminar el trabajo.
+  setInterval(() => {
+    const limit = Number(process.env.TX_TIMEOUT_MS || 15 * 60 * 1000);
+    for (const [id, t] of txs) if (Date.now() - t.lastUsed > limit) endTx(id, false).catch(() => {});
+  }, 30000).unref();
 
   async function rows(sql, params) {
     const r = await exec(sql, params);
@@ -134,6 +189,11 @@ export function createDb2Driver(cfg) {
     },
     exec,
     isConnError,
+    begin,
+    txExec,
+    commit: (id, keep) => endTx(id, true, keep),
+    rollback: (id, keep) => endTx(id, false, keep),
+    transactions: () => [...txs.entries()].map(([id, t]) => ({ id, client: t.client, startedAt: t.startedAt, lastUsed: t.lastUsed, statements: t.stmts, isolation: t.isolation })),
     async createSchema(name) {
       await exec(`CREATE SCHEMA ${name}`);
     },
