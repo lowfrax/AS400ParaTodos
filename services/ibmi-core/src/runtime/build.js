@@ -114,6 +114,8 @@ export async function compileObject(ctx, o) {
       if (extra.length) { r.object.data.modules = extra.map((m) => ({ name: m.name, lib: m.lib, ir: m.ir })); r.object.data.entmod = name; }
     }
   }
+  // Origen del fuente y vista de depuración (STRDBG muestra el fuente del miembro)
+  if (r.object.data && typeof r.object.data === 'object' && r.object.type === '*PGM') r.object.data.src = { lib: mi.LIB, file: srcfile, mbr: mbrName, dbgview: o.dbgview || '*STMT' };
   await putObject(objLib, name, r.object.type, r.object.attr, text, r.object.data, ctx.job.user);
   // Las activaciones en caché del programa anterior dejan de ser válidas.
   for (const [k] of ctx.job.activations) if (k.endsWith(`/${name}`)) ctx.job.activations.delete(k);

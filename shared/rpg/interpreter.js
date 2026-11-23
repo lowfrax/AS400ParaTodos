@@ -437,6 +437,8 @@ export class RpgProgram {
 
   async execList(stmts, sc, fr) {
     for (let i = 0; i < stmts.length; i++) {
+      // Depurador (STRDBG): puntos de interrupción y paso a paso
+      if (this.host.debugStmt) await this.host.debugStmt(stmts[i], sc, this);
       const sig = await this.exec(stmts[i], sc, fr);
       if (sig) {
         // GOTO: se busca el TAG en esta lista; si no está, la señal sube a la lista que la contiene

@@ -332,6 +332,10 @@ export async function runCl(ctx, pgmName, ir, refs) {
 
   async function execList(list, startIdx = 0) {
     for (let i = startIdx; i < list.length; i++) {
+      if (ctx.job.debug && list[i] && list[i].line !== undefined) {
+        const D = await import('../debug.js');
+        await D.onStatement(ctx, null, pgmName, list[i].line, D.clApi(getVar, coerceCl));
+      }
       const s = await execNode(list[i]);
       if (s) return s;
     }

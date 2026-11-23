@@ -74,9 +74,15 @@ function withPosition(desc, f) {
 
 function makeHost(ctx, pgmName) {
   const job = ctx.job;
+  const debugStmt = async (stmt, sc, interp) => {
+    if (!job.debug || !stmt || stmt.line === undefined) return;
+    const D = await import('../debug.js');
+    await D.onStatement(ctx, null, pgmName, stmt.line, D.rpgApi(interp, sc));
+  };
   const client = `${qualifiedJob(job)}:${pgmName || ''}`;
   const printers = [];
   const host = {
+    debugStmt,
     user: job.user,
     // OVRDBF FILE(n) TOFILE(lib/arch): el programa abre el archivo alterado
     describeFile: (n) => {

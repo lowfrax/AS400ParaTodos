@@ -18,7 +18,8 @@
     "test:ssh": "node tests/ssh-e2e.mjs",
     "test:util": "node tests/util-e2e.mjs",
     "test:sda": "node tests/sda-e2e.mjs",
-    "test:sys": "node tests/sys-e2e.mjs"
+    "test:sys": "node tests/sys-e2e.mjs",
+    "test:dbg": "node tests/dbg-e2e.mjs"
   },
   "engines": {
     "node": ">=22.5"

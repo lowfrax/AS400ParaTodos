@@ -243,10 +243,11 @@ const compileDef = (name, title, type, kw = 'PGM', srcDft = 'QRPGLESRC', extra =
   LIBQ('SRCFILE', 'Source file', { req: false, dft: srcDft }),
   P('SRCMBR', 'Source member', 'name', 10, { dft: kw === 'FILE' ? '*FILE' : kw === 'MODULE' ? '*MODULE' : '*PGM', choices: 'Name, *PGM' }),
   P('TEXT', "Text 'description'", 'text', 50, { dft: '*SRCMBRTXT' }),
+  ...(['PGM', 'OBJ', 'MODULE'].includes(kw) ? [P('DBGVIEW', 'Debugging view', 'name', 8, { dft: '*STMT', choices: '*STMT, *SOURCE, *LIST, *COPY, *ALL, *NONE' })] : []),
   ...extra,
 ], async (ctx, a) => compileObject(ctx, {
   type: type || null, obj: a[kw], srcfile: a.SRCFILE, srcmbr: a.SRCMBR, text: a.TEXT, replace: a.REPLACE === '*YES',
-  module: name === 'CRTRPGMOD' || (name === 'CRTSQLRPGI' && a.OBJTYPE === '*MODULE'), bnddir: a.BNDDIR, bndsrvpgm: a.BNDSRVPGM, commit: a.COMMIT,
+  module: name === 'CRTRPGMOD' || (name === 'CRTSQLRPGI' && a.OBJTYPE === '*MODULE'), bnddir: a.BNDDIR, bndsrvpgm: a.BNDSRVPGM, commit: a.COMMIT, dbgview: a.DBGVIEW,
 }));
 const BND = [
   P('DFTACTGRP', 'Default activation group', 'char', 4, { dft: '*YES', choices: '*YES, *NO' }),
