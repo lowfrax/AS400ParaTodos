@@ -6,6 +6,39 @@ const auth = (u, p = u) => ({ Authorization: `Basic ${Buffer.from(`${u}:${p}`).t
 const SECOFR = auth('QSECOFR');
 const LIB = 'SVCTEST';
 const only = new Set(process.argv.slice(2));
+import net from 'node:net';
+
+// Cliente FTP mínimo (modo pasivo) para RETR/STOR binarios
+async function ftp(cmds, { user = 'QSECOFR', pwd = 'QSECOFR', host = '127.0.0.1', port = Number(process.env.FTP_PORT || 21) } = {}) {
+  const sock = net.connect(port, host);
+  let buf = '';
+  const waiters = [];
+  sock.on('data', (d) => { buf += d.toString('latin1'); let m; while ((m = /^(\d{3}) .*\r?\n/m.exec(buf))) { const line = buf.slice(0, m.index + m[0].length); buf = buf.slice(m.index + m[0].length); const w = waiters.shift(); if (w) w(line); } });
+  const reply = () => new Promise((r) => waiters.push(r));
+  const send = async (c) => { sock.write(`${c}\r\n`); return reply(); };
+  await reply();
+  await send(`USER ${user}`); await send(`PASS ${pwd}`); await send('TYPE I');
+  const out = {};
+  for (const [verb, arg, data] of cmds) {
+    if (verb === 'RETR' || verb === 'STOR') {
+      const pasv = await send('PASV');
+      const n = /\((\d+),(\d+),(\d+),(\d+),(\d+),(\d+)\)/.exec(pasv).slice(1).map(Number);
+      const ds = net.connect(n[4] * 256 + n[5], host);
+      await new Promise((r) => ds.once('connect', r));
+      const chunks = [];
+      const done = new Promise((r) => ds.on('end', r).on('close', r));
+      ds.on('data', (c) => chunks.push(c));
+      const first = await send(`${verb} ${arg}`);
+      if (verb === 'STOR') { ds.end(data); }
+      await done;
+      const last = /^1/.test(first) ? await reply() : first;
+      out[arg] = { reply: last, data: Buffer.concat(chunks) };
+    } else out[arg || verb] = await send(`${verb}${arg ? ` ${arg}` : ''}`);
+  }
+  await send('QUIT').catch(() => {});
+  sock.destroy();
+  return out;
+}
 const want = (s) => !only.size || only.has(s);
 
 async function api(method, path, body, h = SECOFR, type = 'application/json') {
@@ -202,6 +235,107 @@ ENDPGM`);
     const bk = await sql("SELECT COUNT(*) AS N FROM QSYS.JRNPF WHERE LIB = 'BANCO' AND JRN = 'QSQJRN'");
     check('las tablas de BANCO están en BANCO/QSQJRN', bk.data && bk.data[0].N >= 5, bk);
     await cmd('DLTLIB LIB(SQLESQ)');
+  }
+
+  if (want('sav')) {
+    for (const l of [LIB, 'SVCCOPY']) await cmd(`DLTLIB LIB(${l})`);
+    await cmd(`CRTLIB LIB(${LIB}) TEXT('Biblioteca a salvar')`);
+    for (const f of ['SVCSAVF', 'SVCSAVF2', 'SVCCHG', 'SECSAVF']) await cmd(`DLTF FILE(QGPL/${f})`);
+    await sql(`CREATE TABLE ${LIB}.CLIENTES (ID INT NOT NULL PRIMARY KEY, NOMBRE VARCHAR(30) NOT NULL, ALTA DATE, SALDO DECIMAL(11, 2) DEFAULT 0)`);
+    await sql(`INSERT INTO ${LIB}.CLIENTES VALUES (1, 'ANA', '2024-01-15', 100.50), (2, 'LUIS', NULL, 2000)`);
+    await sql(`CREATE VIEW ${LIB}.VCLI AS SELECT ID, NOMBRE FROM ${LIB}.CLIENTES WHERE SALDO > 500`);
+    await cmd(`CRTSRCPF FILE(${LIB}/QCLSRC)`);
+    await put('QCLSRC', 'HOLA', 'CLP', `PGM\n  CHGDTAARA DTAARA(${LIB}/DA) VALUE('RESTAURADO')\nENDPGM`);
+    await cmd(`CRTBNDCL PGM(${LIB}/HOLA) SRCFILE(${LIB}/QCLSRC)`);
+    await cmd(`CRTDTAARA DTAARA(${LIB}/DA) TYPE(*CHAR) LEN(20) VALUE(ORIGINAL)`);
+    await cmd(`CRTDTAQ DTAQ(${LIB}/COLA) MAXLEN(100)`);
+    await sql(`CALL QSYS2.SEND_DATA_QUEUE(MESSAGE_DATA => 'mensaje 1', DATA_QUEUE => 'COLA', DATA_QUEUE_LIBRARY => '${LIB}')`);
+    await cmd(`GRTOBJAUT OBJ(${LIB}/CLIENTES) OBJTYPE(*FILE) USER(*PUBLIC) AUT(*EXCLUDE)`);
+    check('CRTSAVF', ok(await cmd('CRTSAVF FILE(QGPL/SVCSAVF)')));
+    const sl = await cmd(`SAVLIB LIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF)`);
+    check('SAVLIB a un archivo de salvar', ok(sl) && /objects saved from library/.test(JSON.stringify(sl)), sl);
+    const ds = await cmd('DSPSAVF FILE(QGPL/SVCSAVF)');
+    const dsT = (ds.messages || []).map((m) => m.text).join('\n');
+    check('DSPSAVF lista los objetos salvados', /CLIENTES\s+\*FILE\s+PF/.test(dsT) && /VCLI\s+\*FILE\s+LF/.test(dsT) && /HOLA\s+\*PGM/.test(dsT) && /COLA\s+\*DTAQ/.test(dsT) && /SAVLIB/.test(dsT), dsT);
+    check('SAVLIB sobre un SAVF con datos sin CLEAR: rechazado', !ok(await cmd(`SAVLIB LIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF)`)));
+    check('DEV(TAP01): CPF9814', errId(await cmd(`SAVLIB LIB(${LIB}) DEV(TAP01)`)) === 'CPF9814');
+
+    // Pérdida total de la biblioteca y restauración
+    await cmd(`DLTLIB LIB(${LIB})`);
+    const rl = await cmd(`RSTLIB SAVLIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF)`);
+    check('RSTLIB restaura la biblioteca', ok(rl) && /objects restored/.test(JSON.stringify(rl)), rl);
+    const cl = await sql(`SELECT ID, NOMBRE, ALTA, SALDO FROM ${LIB}.CLIENTES ORDER BY ID`);
+    check('datos de la tabla (DATE, DECIMAL, NULL)', JSON.stringify(cl.data) === JSON.stringify([{ ID: 1, NOMBRE: 'ANA', ALTA: '2024-01-15', SALDO: 100.5 }, { ID: 2, NOMBRE: 'LUIS', ALTA: null, SALDO: 2000 }]), cl);
+    check('la clave primaria se conserva', errId(await sql(`INSERT INTO ${LIB}.CLIENTES (ID, NOMBRE) VALUES (1, 'DUP')`)) === 'SQL0803');
+    check('el valor por omisión de la columna se conserva', ok(await sql(`INSERT INTO ${LIB}.CLIENTES (ID, NOMBRE) VALUES (3, 'EVA')`)) && (await sql(`SELECT SALDO FROM ${LIB}.CLIENTES WHERE ID = 3`)).data[0].SALDO === 0);
+    check('la vista (LF) funciona', JSON.stringify((await sql(`SELECT NOMBRE FROM ${LIB}.VCLI`)).data) === JSON.stringify([{ NOMBRE: 'LUIS' }]));
+    check('miembro fuente restaurado', /CHGDTAARA/.test((await api('GET', `/sources/${LIB}/QCLSRC/HOLA`)).text || ''));
+    check('área de datos restaurada', /ORIGINAL/.test(JSON.stringify(await cmd(`DSPDTAARA DTAARA(${LIB}/DA)`))));
+    check('el programa restaurado se ejecuta', ok(await cmd(`CALL PGM(${LIB}/HOLA)`)) && /RESTAURADO/.test(JSON.stringify(await cmd(`DSPDTAARA DTAARA(${LIB}/DA)`))));
+    const q = await sql(`SELECT MESSAGE_DATA FROM TABLE(QSYS2.DATA_QUEUE_ENTRIES(DATA_QUEUE => 'COLA', DATA_QUEUE_LIBRARY => '${LIB}'))`);
+    check('entradas de la cola de datos restauradas', /mensaje 1/.test(JSON.stringify(q)), q);
+    check('la autorización *PUBLIC *EXCLUDE se conserva', errId(await sql(`SELECT * FROM ${LIB}.CLIENTES`, auth('DEMO'))) === 'SQL0551');
+    // Copia en otra biblioteca
+    const cp = await cmd(`RSTLIB SAVLIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF) RSTLIB(SVCCOPY)`);
+    check('RSTLIB RSTLIB(otra): copia de la biblioteca, la vista apunta a la nueva', ok(cp) && JSON.stringify((await sql('SELECT NOMBRE FROM SVCCOPY.VCLI')).data) === JSON.stringify([{ NOMBRE: 'LUIS' }]), cp);
+    await cmd('DLTLIB LIB(SVCCOPY)');
+
+    // SAVOBJ / RSTOBJ y recuperación con el diario
+    await cmd(`CRTJRNRCV JRNRCV(${LIB}/RCV0001)`);
+    await cmd(`CRTJRN JRN(${LIB}/JRN) JRNRCV(${LIB}/RCV0001)`);
+    await sql(`CREATE TABLE ${LIB}.MOVTOS (ID INT NOT NULL, IMPORTE DECIMAL(9, 2))`);
+    await cmd(`STRJRNPF FILE(${LIB}/MOVTOS) JRN(${LIB}/JRN) IMAGES(*BOTH)`);
+    await sql(`INSERT INTO ${LIB}.MOVTOS VALUES (1, 10), (2, 20)`);
+    await cmd('CRTSAVF FILE(QGPL/SVCSAVF2)');
+    const so = await cmd(`SAVOBJ OBJ(MOVTOS CLIENTES) LIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF2)`);
+    check('SAVOBJ de dos archivos', ok(so) && /2 objects saved/.test(JSON.stringify(so)), so);
+    await sql(`INSERT INTO ${LIB}.MOVTOS VALUES (3, 30), (4, 40)`);
+    await sql(`UPDATE ${LIB}.MOVTOS SET IMPORTE = 11 WHERE ID = 1`);
+    const dl = await cmd(`DLTF FILE(${LIB}/MOVTOS)`);
+    check('se pierde el archivo (DLTF)', ok(dl), dl);
+    const ro = await cmd(`RSTOBJ OBJ(MOVTOS) SAVLIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF2)`);
+    const m1 = await sql(`SELECT ID, IMPORTE FROM ${LIB}.MOVTOS ORDER BY ID`);
+    check('RSTOBJ devuelve el archivo al momento del salvado', ok(ro) && JSON.stringify(m1.data) === JSON.stringify([{ ID: 1, IMPORTE: 10 }, { ID: 2, IMPORTE: 20 }]), [ro, m1]);
+    check('el archivo restaurado sigue registrado en su diario', /MOVTOS/.test(JSON.stringify(await sql(`SELECT FILE FROM QSYS.JRNPF WHERE LIB = '${LIB}'`))));
+    const ap = await cmd(`APYJRNCHG JRN(${LIB}/JRN) FILE(${LIB}/MOVTOS)`);
+    const m2 = await sql(`SELECT ID, IMPORTE FROM ${LIB}.MOVTOS ORDER BY ID`);
+    check('APYJRNCHG FROMENT(*LASTSAVE): recupera los cambios posteriores al salvado', ok(ap) && JSON.stringify(m2.data) === JSON.stringify([{ ID: 1, IMPORTE: 11 }, { ID: 2, IMPORTE: 20 }, { ID: 3, IMPORTE: 30 }, { ID: 4, IMPORTE: 40 }]), [ap, m2]);
+    await sql(`DELETE FROM ${LIB}.CLIENTES WHERE ID > 0`);
+    const ro2 = await cmd(`RSTOBJ OBJ(CLIENTES) SAVLIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF2) MBROPT(*ALL)`);
+    check('RSTOBJ sobre un objeto existente lo sustituye', ok(ro2) && (await sql(`SELECT COUNT(*) AS N FROM ${LIB}.CLIENTES`)).data[0].N === 3, ro2);
+    check('RSTOBJ MBROPT(*NEW) no toca un archivo existente', /not restored/.test(JSON.stringify(await cmd(`RSTOBJ OBJ(CLIENTES) SAVLIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCSAVF2) MBROPT(*NEW)`))));
+
+    // SAVCHGOBJ
+    await new Promise((r) => setTimeout(r, 1200));
+    await cmd(`CHGDTAARA DTAARA(${LIB}/DA) VALUE(CAMBIADA)`);
+    await cmd('CRTSAVF FILE(QGPL/SVCCHG)');
+    const sc = await cmd(`SAVCHGOBJ OBJ(*ALL) LIB(${LIB}) DEV(*SAVF) SAVF(QGPL/SVCCHG) REFDATE(*SAVLIB)`);
+    const scT = (await cmd('DSPSAVF FILE(QGPL/SVCCHG)')).messages.map((m) => m.text).join('\n');
+    check('SAVCHGOBJ REFDATE(*SAVLIB) salva solo lo cambiado desde el último salvado', ok(sc) && /DA\s+\*DTAARA/.test(scT) && !/HOLA\s+\*PGM/.test(scT), scT);
+
+    // FTP en binario: bajar el SAVF y subirlo a otro
+    const got = await ftp([['RETR', 'QGPL/SVCSAVF']]);
+    check('FTP: GET binario de un SAVF', got['QGPL/SVCSAVF'].data.length > 100 && got['QGPL/SVCSAVF'].data[0] === 0x1f, got['QGPL/SVCSAVF'].reply);
+    await cmd('DLTF FILE(QGPL/SVCSAVF2)');
+    const putR = await ftp([['STOR', 'QGPL/SVCSAVF2', got['QGPL/SVCSAVF'].data]]);
+    const ds2 = (await cmd('DSPSAVF FILE(QGPL/SVCSAVF2)')).messages.map((m) => m.text).join('\n');
+    check('FTP: PUT binario crea y carga el SAVF', /loaded/.test(putR['QGPL/SVCSAVF2'].reply) && /VCLI\s+\*FILE/.test(ds2), [putR['QGPL/SVCSAVF2'].reply, ds2]);
+
+    // Datos de seguridad
+    await cmd('DLTUSRPRF USRPRF(TESTSEC)');
+    await cmd('CRTUSRPRF USRPRF(TESTSEC) PASSWORD(CLAVE1) TEXT(\'Usuario de prueba\')');
+    await cmd(`GRTOBJAUT OBJ(${LIB}/CLIENTES) OBJTYPE(*FILE) USER(TESTSEC) AUT(*USE)`);
+    await cmd('CRTSAVF FILE(QGPL/SECSAVF)');
+    check('SAVSECDTA', ok(await cmd('SAVSECDTA DEV(*SAVF) SAVF(QGPL/SECSAVF)')));
+    await cmd('DLTUSRPRF USRPRF(TESTSEC)');
+    check('el perfil borrado no puede conectarse', !(await api('GET', '/system', undefined, auth('TESTSEC', 'CLAVE1'))).name);
+    const ru = await cmd('RSTUSRPRF DEV(*SAVF) SAVF(QGPL/SECSAVF) USRPRF(TESTSEC)');
+    const si = await api('GET', '/system', undefined, auth('TESTSEC', 'CLAVE1'));
+    check('RSTUSRPRF: el perfil vuelve con su contraseña', ok(ru) && si.name === 'AS400TDS', si);
+    const ra = await cmd('RSTAUT USRPRF(TESTSEC) SAVF(QGPL/SECSAVF)');
+    check('RSTAUT: vuelven sus autorizaciones privadas', ok(ra) && ok(await sql(`SELECT COUNT(*) FROM ${LIB}.CLIENTES`, auth('TESTSEC', 'CLAVE1'))), ra);
+    await cmd('DLTUSRPRF USRPRF(TESTSEC)');
+    for (const f of ['SVCSAVF', 'SVCSAVF2', 'SVCCHG', 'SECSAVF']) await cmd(`DLTF FILE(QGPL/${f})`);
   }
 
   if (!failed) await cmd(`DLTLIB LIB(${LIB})`);

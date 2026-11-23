@@ -331,6 +331,14 @@ class FtpSession {
           if (r.kind === 'qsys') {
             const q = r.q;
             if (!q.obj) throw new Error('A file and member name are required.');
+            // Archivo de salvar (*SAVF) en binario: el contenido del SAVF (se crea si no existe y los datos son de salvar)
+            const sv = await this.savfTarget(q);
+            if (sv || (this.type === 'I' && data[0] === 0x1f && data[1] === 0x8b && (!q.mbr || q.mbr === q.obj))) {
+              const S = await import('../savrst.js');
+              if (!sv) await S.createSavf(q.lib, q.obj.toUpperCase(), 'Created by FTP', this.prf.NAME);
+              await S.loadSavfBytes(q.lib, q.obj.toUpperCase(), data);
+              return this.reply(226, `File transfer completed successfully. Save file ${q.obj.toUpperCase()} in ${q.lib} loaded (${data.length} bytes).`);
+            }
             const n = await writeQsysMember(q.lib, q.obj, q.mbr || q.obj, data.toString('utf8'), { append: verb === 'APPE' });
             return this.reply(226, `File transfer completed successfully. ${n} records written to member ${q.mbr || q.obj} in file ${q.lib}/${q.obj}.`);
           }
@@ -374,10 +382,20 @@ class FtpSession {
     }
   }
 
+  /** Objeto *SAVF designado por la ruta (BIB/ARCHIVO o /QSYS.LIB/BIB.LIB/ARCHIVO.FILE), o null. */
+  async savfTarget(q) {
+    if (!q || !q.obj || (q.mbr && q.mbr.toUpperCase() !== q.obj.toUpperCase())) return null;
+    const { gw: g, findObject: fo } = await import('../objects.js');
+    const o = await fo(g, q.obj.toUpperCase(), '*FILE', q.lib, []);
+    return o && o.ATTR === 'SAVF' ? o : null;
+  }
+
   async readTarget(r) {
     if (r.kind === 'qsys') {
       const q = r.q;
       if (!q.obj) throw new Error('A file name is required.');
+      const sv = await this.savfTarget(q);
+      if (sv) return (await import('../savrst.js')).savfBytes(sv.LIB, sv.NAME);
       const text = await readQsysMember(q.lib, q.obj, q.mbr || q.obj);
       return Buffer.from(text, 'utf8');
     }
