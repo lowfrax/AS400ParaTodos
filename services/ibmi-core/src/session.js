@@ -123,6 +123,36 @@ export class Session {
     }
   }
 
+  /**
+   * Pantalla que interrumpe a la que está esperando (el depurador de un trabajo servido con STRSRVJOB): las teclas
+   * van a esta pantalla; al terminar, restoreScreen() vuelve a mostrar la anterior. Se atienden de una en una.
+   */
+  async overlay(panel) {
+    const prev = this.overlayLock || Promise.resolve();
+    let release;
+    this.overlayLock = new Promise((r) => { release = r; });
+    await prev;
+    try {
+      for (;;) {
+        if (this.closed) throw new Disconnected();
+        this.send({ ...panel.toJSON(), mw: this.mw, dev: this.device, sys: SYS.name });
+        const r = await new Promise((resolve, reject) => { this.sysreqPending = { resolve, reject }; });
+        panel.setValues(r.fields || {});
+        panel.message = null;
+        panel.alarm = false;
+        const fields = {};
+        for (const f of panel.fields) fields[f.n] = f.v;
+        if (panel.keys && r.aid !== 'ENTER' && !panel.keys.includes(r.aid)) { panel.msg({ id: 'CPD9861', text: msgText('CPD9861'), sev: 30 }, true); continue; }
+        return { aid: r.aid, fields, cursor: r.cursor || [1, 1], changed: r.changed || [] };
+      }
+    } finally { release(); }
+  }
+  restoreScreen() {
+    if (this.closed) return;
+    if (this.pending && this.screen) this.send({ ...this.screen.toJSON(), mw: this.mw, dev: this.device, sys: SYS.name });
+    else this.send({ t: 'lock' });
+  }
+
   async messageHelp(m) {
     const h = msgHelp(m.id);
     const p = new Panel({ fn: 'CMD-DSPMSGD', keys: ['F3', 'F12', 'F6', 'F9', 'F21'] });

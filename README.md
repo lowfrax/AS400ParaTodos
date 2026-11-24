@@ -99,7 +99,7 @@ Las contraseñas no distinguen mayúsculas (QPWDLVL 0). Tras 3 intentos fallidos
 
 `SIGNOFF GO WRKACTJOB WRKSYSSTS WRKSBS WRKSPLF WRKOUTQ DSPMSG SNDMSG DSPJOBLOG DSPJOB WRKJOB DSPLIBL CHGCURLIB ADDLIBLE RMVLIBLE CHGLIBL CRTLIB DLTLIB CLRLIB DSPLIB WRKLIB WRKOBJ DSPOBJD DLTOBJ DLTPGM DLTF CHKOBJ CRTSRCPF ADDPFM RMVM STRSEU STRPDM WRKLIBPDM WRKOBJPDM WRKMBRPDM CRTBNDRPG CRTRPGPGM CRTSQLRPGI CRTBNDCL CRTCLPGM CRTPF CRTDSPF CALL SBMJOB DLYJOB ENDJOB STRSQL RUNSQL DSPPFM DSPFFD CLRPFM CPYF CRTDTAARA DSPDTAARA CHGDTAARA CRTUSRPRF CHGUSRPRF CHGPRF CHGPWD DLTUSRPRF WRKUSRPRF DSPUSRPRF WRKSYSVAL DSPSYSVAL CHGSYSVAL SNDPGMMSG PWRDWNSYS` y `CALL QCMD` (*Command Entry*). En programas CL además: `PGM DCL CHGVAR IF/ELSE DO DOWHILE DOUNTIL DOFOR SELECT/WHEN GOTO LEAVE ITERATE RETURN MONMSG (EXEC(DO)) RTVJOBA RTVSYSVAL RTVDTAARA`.
 
-Además: `STRSDA CRTMNU CHGMNU DLTMNU OVRDBF OVRPRTF DLTOVR DSPOVR CPYSPLF DLTSPLF HLDSPLF RLSSPLF CHGSPLFA RUNSQLSTM CRTDUPOBJ RNMOBJ MOVOBJ CHGOBJD CPYSRCF RNMM GRTOBJAUT RVKOBJAUT EDTOBJAUT DSPOBJAUT CHGOBJOWN WRKOBJOWN CHGLIB CRTAUTL DLTAUTL ADDAUTLE CHGAUTLE RMVAUTLE DSPAUTL EDTAUTL DSPAUTLOBJ CRTJRNRCV DLTJRNRCV DSPJRNRCVA CRTJRN DLTJRN CHGJRN WRKJRNA STRJRNPF ENDJRNPF DSPJRN APYJRNCHG RMVJRNCHG SNDJRNE CRTSAVF CLRSAVF DSPSAVF SAVOBJ SAVLIB SAVCHGOBJ SAVSECDTA RSTOBJ RSTLIB RSTUSRPRF RSTAUT CRTCMD CHGCMD DLTCMD DSPCMD STRDBG ENDDBG DSPMODSRC ADDPGM RMVPGM ADDBKP RMVBKP DSPDBG STRQRY WRKQRY RUNQRY DLTQRY STRRLU ADDJOBSCDE CHGJOBSCDE RMVJOBSCDE HLDJOBSCDE RLSJOBSCDE WRKJOBSCDE CRTLF CRTPRTF CRTRPGMOD CRTSRVPGM CRTPGM UPDPGM UPDSRVPGM CRTBNDDIR ADDBNDDIRE CRTMSGF ADDMSGD CHGMSGD RMVMSGD DSPMSGD WRKMSGF RTVMSG RCVMSG SNDUSRMSG CVTRPGSRC` (y `STRQSH`/`QSH`, FTP, SSH, REXEC).
+Además: `STRSDA CRTMNU CHGMNU DLTMNU OVRDBF OVRPRTF DLTOVR DSPOVR CPYSPLF DLTSPLF HLDSPLF RLSSPLF CHGSPLFA RUNSQLSTM CRTDUPOBJ RNMOBJ MOVOBJ CHGOBJD CPYSRCF RNMM GRTOBJAUT RVKOBJAUT EDTOBJAUT DSPOBJAUT CHGOBJOWN WRKOBJOWN CHGLIB CRTAUTL DLTAUTL ADDAUTLE CHGAUTLE RMVAUTLE DSPAUTL EDTAUTL DSPAUTLOBJ CRTJRNRCV DLTJRNRCV DSPJRNRCVA CRTJRN DLTJRN CHGJRN WRKJRNA STRJRNPF ENDJRNPF DSPJRN APYJRNCHG RMVJRNCHG SNDJRNE CRTSAVF CLRSAVF DSPSAVF SAVOBJ SAVLIB SAVCHGOBJ SAVSECDTA SAVSYS SAVCFG SAV RSTOBJ RSTLIB RSTUSRPRF RSTAUT RSTCFG RST CRTDEVTAP DLTDEVD DSPDEVD WRKDEVD VRYCFG WRKCFGSTS CRTIMGCLG DLTIMGCLG ADDIMGCLGE RMVIMGCLGE CHGIMGCLGE LODIMGCLG LODIMGCLGE WRKIMGCLG WRKIMGCLGE INZTAP DSPTAP CHKTAP CHGAUT DSPAUT WRKAUT CHGOWN CHGPGP CPYAUT CRTCMD CHGCMD DLTCMD DSPCMD STRDBG ENDDBG DSPMODSRC ADDPGM RMVPGM ADDBKP RMVBKP DSPDBG STRSRVJOB ENDSRVJOB DSPSRVSTS HLDJOB RLSJOB STRQRY WRKQRY RUNQRY DLTQRY STRRLU ADDJOBSCDE CHGJOBSCDE RMVJOBSCDE HLDJOBSCDE RLSJOBSCDE WRKJOBSCDE CRTLF CRTPRTF CRTRPGMOD CRTSRVPGM CRTPGM UPDPGM UPDSRVPGM CRTBNDDIR ADDBNDDIRE CRTMSGF ADDMSGD CHGMSGD RMVMSGD DSPMSGD WRKMSGF RTVMSG RCVMSG SNDUSRMSG CVTRPGSRC` (y `STRQSH`/`QSH`, FTP, SSH, REXEC).
 
 ### RPG IV soportado
 
@@ -145,8 +145,8 @@ npm run test:util        # OVRDBF/OVRPRTF, spool, RUNSQLSTM, objetos y planifica
 npm run test:ssh         # OpenSSH/SFTP con el cliente ssh del sistema
 npm run test:sda         # SDA por el terminal 5250: pantallas, prueba de pantallas, menús y GO
 npm run test:connections # TN5250, FTP, servidores host (jt400), REST/IWS, Mapepire, DRDA…
-npm run test:sys         # QTEMP por trabajo, seguridad de objetos, diarios, salvar/restaurar, CRTCMD
-npm run test:dbg         # depurador STRDBG por el terminal 5250
+npm run test:sys         # QTEMP por trabajo, seguridad de objetos y del IFS, diarios, salvar/restaurar (SAVF y cinta), CRTCMD, COMMIT
+npm run test:dbg         # depurador STRDBG por el terminal 5250 (vistas *STMT/*LIST/*SOURCE, STRSRVJOB)
 npm run test:qry         # Query/400 (WRKQRY, RUNQRY)
 npm run test:rlu         # RLU (STRRLU) y uso del archivo de impresora desde RPG
 ```
@@ -175,16 +175,18 @@ docker-compose.yml      Db2 + los tres servicios
 Implementado y comprobado contra Db2 real: TN5250 (ACS, tn5250j), FTP/FTPS (también SAVF en binario), servidores
 host de jt400/ODBC, DRDA, REST/IWS, Mapepire, SSH/SFTP, SMTP; RPG II/III/IV/libre con el ciclo, ILE, archivos
 lógicos, de impresora y de pantalla, DS sobre bytes EBCDIC y de múltiples apariciones, SQL incrustado, control de
-compromiso con diarios (SQL7008 sin diario), colas de datos, archivos de mensajes, alteraciones, planificador,
-QTEMP por trabajo, seguridad de objetos (QSECURITY 40) también en el IFS (`CHGAUT`, `WRKAUT`, `DSPAUT`, `CHGOWN`,
-`CHGPGP`, `CPYAUT`, `chmod`/`chown` de QSH, `QSYS2.IFS_OBJECT_PRIVILEGES`), salvar/restaurar en SAVF, mandatos de usuario, depurador,
-Query/400, PDM, SEU, SDA y RLU. Diferencias que quedan, por la naturaleza del emulador:
+compromiso con diarios (SQL7008 sin diario; `CRTSQLRPGI` y `RUNSQL` con `COMMIT(*CHG)` por omisión), colas de datos,
+archivos de mensajes, alteraciones, planificador, QTEMP por trabajo, seguridad de objetos (QSECURITY 40) también en
+el IFS (`CHGAUT`, `WRKAUT`, `DSPAUT`, `CHGOWN`, `CHGPGP`, `CPYAUT`, `chmod`/`chown` de QSH,
+`QSYS2.IFS_OBJECT_PRIVILEGES`), salvar/restaurar en SAVF y en cinta virtual (`TAPVRT01`, catálogos de imágenes,
+`INZTAP`, `DSPTAP`, `SAVSYS`, `SAV`/`RST`, `GO SAVE`/`GO RESTORE`), mandatos de usuario, depurador (vistas `*STMT`,
+`*SOURCE`, `*LIST`, `*ALL` y `STRSRVJOB` para trabajos por lotes), Query/400, PDM, SEU, SDA y RLU. Diferencias que
+quedan, por la naturaleza del emulador:
 
-- No hay unidades de cinta ni óptico: salvar y restaurar usan archivos de salvar (`DEV(*SAVF)`); `SAVSYS` y las
-  cintas no existen. Un SAVF contiene una sola biblioteca.
-- `CRTSQLRPGI` usa `COMMIT(*NONE)` por omisión (en IBM i es `*CHG`) para que los programas de ejemplo funcionen
-  sobre tablas sin diario; con `COMMIT(*CHG)` el comportamiento es el de IBM i (SQL7008 si la tabla no está en un diario).
-- El depurador muestra el fuente del miembro aunque el programa se compile con `DBGVIEW(*STMT)` (solo `*NONE` impide depurar)
-  y depura trabajos interactivos (no `STRSRVJOB`).
+- La cinta es solo virtual (`CRTDEVTAP RSRCNAME(*VRT)` con catálogos de imágenes en el IFS); no hay unidades físicas
+  ni óptico. `SAVSYS` y las opciones 21/22/23 de `GO SAVE` no llevan el sistema al estado restringido (los
+  subsistemas siguen activos), y la opción 21 de `GO RESTORE` (restaurar el sistema entero) no existe: requiere un
+  IPL manual desde el soporte de instalación.
+- `HLDJOB`/`RLSJOB` actúan sobre trabajos en la cola (`SBMJOB HOLD(*YES)`); un trabajo ya activo no se puede retener.
 - Las bibliotecas cuyo nombre empieza por `SYS` no se pueden crear (Db2 reserva esos esquemas).
 - Las pantallas reproducen el aspecto y la navegación de IBM i 7.x a partir de documentación pública; algunos textos de ayuda (F1) son genéricos.

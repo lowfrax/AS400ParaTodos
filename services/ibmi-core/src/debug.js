@@ -9,24 +9,55 @@ import { RpgCancel } from '../../../shared/rpg/interpreter.js';
 const up = (s) => String(s ?? '').trim().toUpperCase();
 export const dbg = (job) => job.debug || null;
 
-/** Programa preparado para depurar: { lib, name, kind, lines, bps: Map(línea → condición|null) }. */
+/**
+ * Programa preparado para depurar: { lib, name, kind, view, lines, bps: Map(sentencia → condición|null), note }.
+ * Vistas de depuración como en IBM i (DBGVIEW del mandato de compilación):
+ *   *STMT    solo números de sentencia (del listado de compilación): BREAK n y EVAL, sin fuente en pantalla
+ *   *SOURCE  el fuente del miembro (se lee al depurar: si cambió después de compilar puede no coincidir)
+ *   *COPY    como *SOURCE (los /COPY se muestran en el miembro que los contiene)
+ *   *LIST    el listado guardado dentro del programa al compilar (no depende del miembro)
+ *   *ALL     listado y fuente
+ *   *NONE    sin datos de depuración: no se puede depurar
+ */
 export async function debugProgram(ctx, name, lib) {
   const o = await findObject(gw, up(name), '*PGM', !lib || lib === '*LIBL' ? '*LIBL' : ctx.resolveLib(lib), ctx.libl);
   if (!o) throw new CLError('CPF9811', up(name), lib || '*LIBL');
   const d = await objectData(gw, o.LIB, o.NAME, '*PGM');
   if (!d) throw new CLError('CPF9811', up(name), o.LIB);
-  if (d.src && d.src.dbgview === '*NONE') throw new CLError('CPF9898', `Program ${o.NAME} in ${o.LIB} has no debug data; compile it with DBGVIEW(*SOURCE).`);
-  let lines = [];
-  if (d.src) lines = (await readMember(gw, d.src.lib, d.src.file, d.src.mbr).catch(() => [])).map((l) => l.text);
-  if (!lines.length) throw new CLError('CPF9898', `Source for program ${o.NAME} in ${o.LIB} not available; compile it with DBGVIEW(*SOURCE).`);
-  return { lib: o.LIB, name: o.NAME, kind: d.kind, lines, bps: new Map() };
+  const view = up((d.src && d.src.dbgview) || '*STMT');
+  if (view === '*NONE') throw new CLError('CPF9898', `Program ${o.NAME} in ${o.LIB} has no debug data; compile it with DBGVIEW(*STMT), *SOURCE, *LIST or *ALL.`);
+  let lines = null;
+  let note = null;
+  if ((view === '*LIST' || view === '*ALL') && d.src && Array.isArray(d.src.listing)) {
+    lines = d.src.listing;
+    note = 'Listing view.';
+  } else if (['*SOURCE', '*COPY', '*ALL', '*LIST'].includes(view)) {
+    if (d.src) lines = (await readMember(gw, d.src.lib, d.src.file, d.src.mbr).catch(() => [])).map((l) => l.text);
+    if (!lines || !lines.length) throw new CLError('CPF9898', `Source for program ${o.NAME} not available: member ${d.src ? `${d.src.lib}/${d.src.file}(${d.src.mbr})` : ''} not found. Compile with DBGVIEW(*LIST) to keep the listing in the program.`);
+    // El miembro cambió después de compilar: la vista del fuente puede no coincidir con el programa
+    if (d.src && d.src.compiled) {
+      const m = await gw.rows('SELECT CHANGED FROM QSYS.MEMBERS WHERE LIB = ? AND SRCF = ? AND MBR = ?', [d.src.lib, d.src.file, d.src.mbr]).catch(() => []);
+      if (m[0] && m[0].CHANGED && new Date(String(m[0].CHANGED).replace(' ', 'T')) > new Date(d.src.compiled)) note = `Source member ${d.src.mbr} changed after the program was created; the source view may not match the program.`;
+    }
+  }
+  return { lib: o.LIB, name: o.NAME, kind: d.kind, view, lines: lines || [], stmtOnly: !lines, bps: new Map(), note };
+}
+
+/** Trabajo al que se aplican los mandatos de depuración: el servido con STRSRVJOB o el propio. */
+export function targetJob(ctx) {
+  const t = ctx.job.serviced;
+  if (t && !t.endedAt) return t;
+  return ctx.job;
 }
 
 export async function startDebug(ctx, pgms, { updprod = false } = {}) {
-  if (ctx.job.debug) throw new CLError('CPF1999', 'Debug mode already active; use ADDPGM or ENDDBG.');
+  const job = targetJob(ctx);
+  if (job.debug) throw new CLError('CPF1999', 'Debug mode already active; use ADDPGM or ENDDBG.');
   const d = { pgms: new Map(), updprod, step: null };
   for (const p of pgms) { const dp = await debugProgram(ctx, p.name, p.lib); d.pgms.set(`${dp.lib}/${dp.name}`, dp); }
-  ctx.job.debug = d;
+  // Trabajo servido: las paradas se muestran en la estación de trabajo que lo sirve
+  if (job !== ctx.job) d.host = { session: ctx.session, job: ctx.job };
+  job.debug = d;
   return d;
 }
 
@@ -50,7 +81,9 @@ const fmt = (v) => {
  */
 export async function onStatement(ctx, lib, name, line, api) {
   const d = dbg(ctx.job);
-  if (!d || !ctx.session || line === undefined || line === null) return;
+  if (!d || line === undefined || line === null) return;
+  const host = d.host && d.host.session && !d.host.session.closed ? d.host : null;
+  if (!host && !ctx.session) return;
   const dp = findPgm(ctx.job, lib, name);
   if (!dp) return;
   let reason = null;
@@ -64,13 +97,20 @@ export async function onStatement(ctx, lib, name, line, api) {
     if (ok) reason = `Breakpoint at line ${line} in program ${dp.name}.`;
   }
   if (!reason) return;
-  await sourceScreen(ctx, dp, line, api, reason);
+  // Trabajo servido (STRSRVJOB): la pantalla interrumpe a la estación de trabajo que lo sirve y el trabajo espera
+  const ui = host ? { display: (p) => host.session.overlay(p), done: () => host.session.restoreScreen(), job: ctx.job } : null;
+  await sourceScreen(ctx, dp, line, api, reason, ui);
 }
 
 /** Pantalla Display Module Source (detenido en `line`, o sin detener si line = null). */
-export async function sourceScreen(ctx, dp, line, api, message) {
-  const d = dbg(ctx.job);
+export async function sourceScreen(ctx, dp, line, api, message, ui = null) {
+  try { return await sourceLoop(ctx, dp, line, api, message, ui); } finally { if (ui) ui.done(); }
+}
+async function sourceLoop(ctx, dp, line, api, message, ui) {
+  const d = dbg(ui ? ui.job : targetJob(ctx));
+  const show = ui ? ui.display : (p) => ctx.display(p);
   const ROWS = 15;
+  if (!message && dp.note) message = dp.note;
   let top = Math.max(1, (line || 1) - 6);
   let msg = message ? { text: message } : null;
   let evalLines = null;
@@ -78,7 +118,15 @@ export async function sourceScreen(ctx, dp, line, api, message) {
     const p = new Panel({ fn: 'DBG-DSPMODSRC', keys: ['F3', 'F6', 'F10', 'F11', 'F12', 'F13', 'PAGEUP', 'PAGEDOWN'] });
     p.title('Display Module Source');
     p.text(2, 2, `Program:   ${padR(dp.name, 10)}   Library:   ${padR(dp.lib, 10)}   Module:   ${dp.name}`, 'g');
-    for (let i = 0; i < ROWS; i++) {
+    if (ui) p.text(2, 70, `Job ${ui.job.number}`, 'w');
+    if (dp.stmtOnly) {
+      // DBGVIEW(*STMT): no hay fuente; se trabaja con números de sentencia del listado de compilación
+      p.text(4, 2, `Source is not available: program ${dp.name} was created with DBGVIEW(*STMT).`, 'g');
+      p.text(5, 2, 'Use statement numbers from the compiler listing: BREAK n [WHEN expr], CLEAR n, EVAL.', 'g');
+      if (line) p.text(7, 2, `> Stopped at statement ${line}.`, 'wv');
+      p.text(9, 2, `Breakpoints: ${dp.bps.size ? [...dp.bps.entries()].map(([n, c]) => `${n}${c ? ` WHEN ${c}` : ''}`).join(', ') : 'none'}`.slice(0, 78), 'w');
+    }
+    for (let i = 0; i < ROWS && !dp.stmtOnly; i++) {
       const n = top + i;
       const t = dp.lines[n - 1];
       if (t === undefined) break;
@@ -94,8 +142,8 @@ export async function sourceScreen(ctx, dp, line, api, message) {
     if (msg) p.msg(msg);
     msg = null;
     evalLines = null;
-    if (line) p.cursor = [3 + (line - top), 9];
-    const r = await ctx.display(p);
+    if (line && !dp.stmtOnly) p.cursor = [3 + (line - top), 9];
+    const r = await show(p);
     const cmd = String(r.fields.DBG || '').trim();
     const cursorLine = r.cursor && r.cursor[0] >= 3 && r.cursor[0] < 3 + ROWS ? top + r.cursor[0] - 3 : null;
     if (r.aid === 'F3') { if (line) { d.step = null; throw new RpgCancel(); } return 'F3'; }
@@ -107,6 +155,7 @@ export async function sourceScreen(ctx, dp, line, api, message) {
       d.step = { key: `${dp.lib}/${dp.name}`, count: 1 };
       return 'STEP';
     }
+    if (r.aid === 'F6' && dp.stmtOnly) { msg = { text: 'No source view (DBGVIEW(*STMT)): use BREAK statement-number.', sev: 30 }; continue; }
     if (r.aid === 'F6') {
       const n = cursorLine;
       if (!n || !dp.lines[n - 1]) { msg = { text: 'Cursor not on a source line.', sev: 30 }; continue; }
@@ -134,7 +183,7 @@ export async function sourceScreen(ctx, dp, line, api, message) {
         if (asg && !/[<>!]$/.test(asg[1])) { await api.assign(expr); msg = { text: `${asg[1].toUpperCase()} = ${fmt(await api.evalExpr(asg[1]))}` }; } else msg = { text: `${expr.toUpperCase()} = ${fmt(await api.evalExpr(expr))}` };
       } else if (verb === 'BREAK' || verb === 'BR') {
         const n = Number(words[1]);
-        if (!n || !dp.lines[n - 1]) throw new Error(`Line ${words[1]} not valid.`);
+        if (!n || (!dp.stmtOnly && !dp.lines[n - 1])) throw new Error(`${dp.stmtOnly ? 'Statement' : 'Line'} ${words[1]} not valid.`);
         const w = /\bWHEN\b\s+([\s\S]+)$/i.exec(cmd);
         dp.bps.set(n, w ? w[1] : null);
         msg = { text: `Breakpoint added to line ${n}${w ? ` (conditional: ${w[1]})` : ''}.` };

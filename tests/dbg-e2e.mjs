@@ -122,6 +122,63 @@ try {
   await t.waitFor(/Display Program Messages/);
   check('sin depuración el programa no se detiene', /150\.00/.test(t.text()), t.text());
   await t.send('ENTER');
+
+  // DBGVIEW(*STMT): sin vista de fuente, se trabaja con números de sentencia
+  await api('PUT', `/sources/${LIB}/QRPGLESRC/CALCVIEW?type=RPGLE`, { lines: RPG.split('\n') });
+  await cmd(`CRTBNDRPG PGM(${LIB}/CALCSTMT) SRCFILE(${LIB}/QRPGLESRC) SRCMBR(CALCVIEW)`);
+  await t.cmd(`STRDBG PGM(${LIB}/CALCSTMT)`);
+  await t.waitFor(/Display Module Source/);
+  check('DBGVIEW(*STMT) por omisión: no se muestra el fuente', /Source is not available/.test(t.text()) && !/total \+= i/.test(t.text()), t.text());
+  await t.send('ENTER', { DBG: 'BREAK 6' });
+  await t.send('F12');
+  await t.cmd('CALL CALCSTMT');
+  await t.waitFor(/Stopped at statement 6/);
+  await t.send('ENTER', { DBG: 'EVAL i' });
+  check('*STMT: BREAK por número de sentencia y EVAL', /I = 1\b/.test(msg()), msg());
+  await t.send('ENTER', { DBG: 'CLEAR 6' });
+  await t.send('F12');
+  await t.waitFor(/Display Program Messages/);
+  await t.send('ENTER');
+  await t.cmd('ENDDBG');
+  // *LIST guarda el listado en el programa; *SOURCE lee el miembro (y avisa si cambió después de compilar)
+  await cmd(`CRTBNDRPG PGM(${LIB}/CALCLIST) SRCFILE(${LIB}/QRPGLESRC) SRCMBR(CALCVIEW) DBGVIEW(*LIST)`);
+  await cmd(`CRTBNDRPG PGM(${LIB}/CALCSRC) SRCFILE(${LIB}/QRPGLESRC) SRCMBR(CALCVIEW) DBGVIEW(*SOURCE)`);
+  await new Promise((r) => setTimeout(r, 1100));
+  await api('PUT', `/sources/${LIB}/QRPGLESRC/CALCVIEW?type=RPGLE`, { lines: ['**FREE', '// MIEMBRO CAMBIADO', ...RPG.split('\n').slice(1)] });
+  await t.cmd(`STRDBG PGM(${LIB}/CALCLIST)`);
+  await t.waitFor(/Display Module Source/);
+  check('*LIST: el listado de la compilación aunque el miembro cambie', !/MIEMBRO CAMBIADO/.test(t.text()) && /dcl-s i int/.test(t.text()), t.text());
+  await t.send('F12');
+  await t.cmd('ENDDBG');
+  await t.cmd(`STRDBG PGM(${LIB}/CALCSRC)`);
+  await t.waitFor(/Display Module Source/);
+  check('*SOURCE: el miembro actual, con aviso de que cambió', /MIEMBRO CAMBIADO/.test(t.text()) && /changed after the program was created/.test(t.text()), t.text());
+  await t.send('F12');
+  await t.cmd('ENDDBG');
+
+  // STRSRVJOB: depurar un trabajo por lotes desde esta estación de trabajo
+  await t.cmd(`SBMJOB CMD(CALL PGM(${LIB}/CALCULA)) JOB(DBGBATCH) HOLD(*YES)`);
+  const jm = /(\d{6})\/(\w+)\/(DBGBATCH)/.exec(msg());
+  check('SBMJOB HOLD(*YES)', !!jm, msg());
+  const jobq = jm ? `${jm[1]}/${jm[2]}/${jm[3]}` : '';
+  await t.cmd(`STRSRVJOB JOB(${jobq})`);
+  check('STRSRVJOB de un trabajo retenido en la cola', /Service job started/.test(msg()), msg());
+  await t.cmd(`STRDBG PGM(${LIB}/CALCULA)`);
+  await t.waitFor(/Display Module Source/);
+  await t.send('ENTER', { DBG: 'BREAK 8' });
+  await t.send('F12');
+  await t.cmd(`RLSJOB JOB(${jobq})`);
+  await t.waitFor(/Breakpoint at line 8/, 30000);
+  check('al llegar al punto de interrupción, el trabajo por lotes interrumpe esta pantalla', new RegExp(`Job ${jm && jm[1]}`).test(t.text()), t.text());
+  await t.send('ENTER', { DBG: 'EVAL total' });
+  check('EVAL de una variable del trabajo por lotes', /TOTAL = 150/.test(msg()), msg());
+  await t.send('F12');
+  await t.waitFor(/Main Menu|Selection or command/);
+  await new Promise((r) => setTimeout(r, 1500));
+  const jobs = await api('GET', '/jobs');
+  check('el trabajo por lotes continúa y termina', !JSON.stringify(jobs).includes(`"${jm && jm[1]}`), JSON.stringify(jobs).slice(0, 300));
+  await t.cmd('ENDSRVJOB');
+  check('ENDSRVJOB', /Service job ended/.test(msg()), msg());
 } catch (e) { failed++; console.log(`FAIL ${e.message}`); }
 t.close();
 if (!failed) await cmd(`DLTLIB LIB(${LIB})`);

@@ -117,7 +117,11 @@ export async function compileObject(ctx, o) {
     }
   }
   // Origen del fuente y vista de depuración (STRDBG muestra el fuente del miembro)
-  if (r.object.data && typeof r.object.data === 'object' && r.object.type === '*PGM') r.object.data.src = { lib: mi.LIB, file: srcfile, mbr: mbrName, dbgview: o.dbgview || '*STMT' };
+  // *LIST/*ALL guardan el listado en el programa (se puede depurar aunque el miembro cambie o desaparezca)
+  if (r.object.data && typeof r.object.data === 'object' && r.object.type === '*PGM') {
+    const dbgview = String(o.dbgview || '*STMT').toUpperCase();
+    r.object.data.src = { lib: mi.LIB, file: srcfile, mbr: mbrName, dbgview, compiled: new Date().toISOString(), ...(['*LIST', '*ALL'].includes(dbgview) ? { listing: source.map((l) => l.text) } : {}) };
+  }
   await putObject(objLib, name, r.object.type, r.object.attr, text, r.object.data, ctx.job.user);
   // Las activaciones en caché del programa anterior dejan de ser válidas.
   for (const [k] of ctx.job.activations) if (k.endsWith(`/${name}`)) ctx.job.activations.delete(k);
@@ -129,7 +133,7 @@ export async function compileObject(ctx, o) {
 }
 
 /** SBMJOB: ejecuta un mandato en un trabajo por lotes de QBATCH. */
-export async function submitJob(ctx, cmdText, jobName) {
+export async function submitJob(ctx, cmdText, jobName, { hold = false } = {}) {
   const { Ctx } = await import('../ctx.js');
   const { runCommand } = await import('../commands/registry.js');
   const job = createJob({ name: (jobName || ctx.job.user).slice(0, 10), user: ctx.job.user, type: 'BCH', subsystem: 'QBATCH', fn: '', status: 'RUN' });
@@ -137,7 +141,18 @@ export async function submitJob(ctx, cmdText, jobName) {
   job.curlib = ctx.job.curlib;
   const bctx = new Ctx({ job, user: ctx.user, interactive: false });
   const fromJob = qualifiedJob(ctx.job);
+  // SBMJOB HOLD(*YES): el trabajo espera en la cola (HLD) hasta RLSJOB; HLDJOB lo vuelve a retener mientras espera
+  job.onJobq = true;
+  job.held = !!hold;
+  setStatus(job, hold ? 'HLD' : 'JOBQ', '');
+  const waitRelease = () => new Promise((resolve) => {
+    const tick = () => { if (job.cancel || !job.held) resolve(); else setTimeout(tick, 200); };
+    tick();
+  });
   setTimeout(async () => {
+    await waitRelease();
+    job.onJobq = false;
+    if (job.cancel) { logJob(job, 'CPF1164', '*COMP', 'Job ended while on the job queue.'); endJob(job, 30); return; }
     setStatus(job, 'RUN', `CMD-${String(cmdText).trim().split(/\s|\(/)[0].toUpperCase()}`);
     let ok = true;
     let lastText = '';

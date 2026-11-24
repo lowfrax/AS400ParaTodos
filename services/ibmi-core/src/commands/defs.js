@@ -348,7 +348,31 @@ def('SBMJOB', 'Submit Job', [
   P('CMD', 'Command to run', 'cmd', 256, { req: true, promptLen: 120 }),
   P('JOB', 'Job name', 'name', 10, { dft: '*JOBD' }),
   P('JOBQ', 'Job queue', 'name', 10, { dft: '*JOBD' }),
-], async (ctx, a) => submitJob(ctx, a.CMD, a.JOB === '*JOBD' ? (a.CMD.match(/PGM\(([^)]+)\)/i)?.[1].split('/').pop() || ctx.job.user) : a.JOB));
+  P('HOLD', 'Hold on job queue', 'char', 5, { dft: '*JOBD', choices: '*JOBD, *NO, *YES' }),
+], async (ctx, a) => submitJob(ctx, a.CMD, a.JOB === '*JOBD' ? (a.CMD.match(/PGM\(([^)]+)\)/i)?.[1].split('/').pop() || ctx.job.user) : a.JOB, { hold: a.HOLD === '*YES' }));
+// Trabajos en la cola: HLDJOB / RLSJOB (un trabajo activo no se retiene en este sistema)
+async function jobArg(a) {
+  const { allJobs } = await import('../system.js');
+  const [nbr, user, name] = String(a.JOB).toUpperCase().split('/');
+  const j = allJobs().find((x) => (x.number === String(nbr).padStart(6, '0') || x.name === nbr) && (!user || x.user === user) && (!name || x.name === name));
+  if (!j) throw new CLError('CPF1321', name || nbr, user || '', '');
+  return j;
+}
+def('HLDJOB', 'Hold Job', [P('JOB', 'Job name (number/user/name)', 'char', 28, { req: true })], async (ctx, a) => {
+  const j = await jobArg(a);
+  if (!j.onJobq) throw new CLError('CPF9898', `Job ${j.number}/${j.user}/${j.name} is active; only jobs on a job queue can be held on this system.`);
+  if (j.held) throw new CLError('CPF9898', `Job ${j.number}/${j.user}/${j.name} already held.`);
+  j.held = true;
+  j.status = 'HLD';
+  return { id: 'CPC1202', text: `Job ${j.number}/${j.user}/${j.name} held by user ${ctx.job.user}.` };
+});
+def('RLSJOB', 'Release Job', [P('JOB', 'Job name (number/user/name)', 'char', 28, { req: true })], async (ctx, a) => {
+  const j = await jobArg(a);
+  if (!j.held) throw new CLError('CPF9898', `Job ${j.number}/${j.user}/${j.name} not held.`);
+  j.held = false;
+  j.status = 'JOBQ';
+  return { id: 'CPC1204', text: `Job ${j.number}/${j.user}/${j.name} released by user ${ctx.job.user}.` };
+});
 def('DLYJOB', 'Delay Job', [P('DLY', 'Job delay time', 'int', 6, { req: true, choices: 'Seconds' })], async (ctx, a) => {
   const prev = ctx.job.status;
   ctx.job.status = 'DLYW';
