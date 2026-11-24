@@ -101,7 +101,9 @@ export async function compileObject(ctx, o) {
   }
   if (r.object.data && r.object.data.kind === 'RPG') {
     const ir = r.object.data.ir;
-    if (o.commit && !['*NONE', '*NC'].includes(String(o.commit).toUpperCase())) ir.$commit = String(o.commit).toUpperCase();
+    // CRTSQLRPGI compila con COMMIT(*CHG) salvo que se indique otra cosa (también desde PDM o la API)
+    const commit = o.commit ?? (o.type === 'SQLRPGLE' ? '*CHG' : null);
+    if (commit && !['*NONE', '*NC'].includes(String(commit).toUpperCase())) ir.$commit = String(commit).toUpperCase();
     if (ir.ctl && ir.ctl.NOMAIN) {
       logJob(ctx.job, 'RNF0143', '*DIAG', `Module ${name} has no main procedure (NOMAIN); use CRTRPGMOD and CRTSRVPGM.`, { sev: 30 });
       throw new CLError('CPF5D0B', `Program entry procedure module not found; program ${name} not created in library ${objLib}.`);

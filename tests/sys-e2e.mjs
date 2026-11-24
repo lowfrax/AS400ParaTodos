@@ -493,6 +493,116 @@ ENDPGM`);
     for (const u of ['IFSUSR', 'IFSGRP']) await cmd(`DLTUSRPRF USRPRF(${u})`);
   }
 
+  if (want('commit')) {
+    // CRTSQLRPGI y RUNSQL usan COMMIT(*CHG) por omisión: modificar una tabla sin diario da SQL7008
+    await sql(`DROP TABLE ${LIB}.CMTT`);
+    await sql(`CREATE TABLE ${LIB}.CMTT (N INT)`);
+    await cmd(`CRTSRCPF FILE(${LIB}/QRPGLESRC)`);
+    await put('QRPGLESRC', 'CMTINS', 'SQLRPGLE', `**FREE\nexec sql insert into ${LIB}.CMTT values (1);\n*inlr = *on;`);
+    check('CRTSQLRPGI sin COMMIT', ok(await cmd(`CRTSQLRPGI OBJ(${LIB}/CMTINS) SRCFILE(${LIB}/QRPGLESRC)`)));
+    await cmd(`CALL PGM(${LIB}/CMTINS)`);
+    const n1 = await sql(`SELECT COUNT(*) AS N FROM ${LIB}.CMTT`);
+    check('COMMIT(*CHG) por omisión: el INSERT en una tabla sin diario no se hace (SQL7008)', n1.data && n1.data[0].N === 0, n1);
+    await cmd(`CRTSQLRPGI OBJ(${LIB}/CMTINS) SRCFILE(${LIB}/QRPGLESRC) COMMIT(*NONE)`);
+    await cmd(`CALL PGM(${LIB}/CMTINS)`);
+    const n2 = await sql(`SELECT COUNT(*) AS N FROM ${LIB}.CMTT`);
+    check('COMMIT(*NONE): sí', n2.data && n2.data[0].N === 1, n2);
+    const r1 = await cmd(`RUNSQL SQL('INSERT INTO ${LIB}.CMTT VALUES (2)')`);
+    check('RUNSQL sin COMMIT en tabla sin diario: SQL7008', errId(r1) === 'SQL7008', r1);
+    check('RUNSQL COMMIT(*NONE)', ok(await cmd(`RUNSQL SQL('INSERT INTO ${LIB}.CMTT VALUES (2)') COMMIT(*NONE)`)));
+    await sql('DROP SCHEMA CMTSCH CASCADE').catch(() => {});
+    await cmd('DLTLIB LIB(CMTSCH)');
+    await sql('CREATE SCHEMA CMTSCH');
+    await sql('CREATE TABLE CMTSCH.T (N INT)');
+    check('RUNSQL COMMIT(*CHG) en una tabla de un esquema SQL (QSQJRN): se confirma', ok(await cmd("RUNSQL SQL('INSERT INTO CMTSCH.T VALUES (7)')")) && (await sql('SELECT N FROM CMTSCH.T')).data?.[0]?.N === 7);
+    await cmd('DLTLIB LIB(CMTSCH)');
+  }
+
+  if (want('tape')) {
+    // Cinta virtual: catálogo de imágenes, INZTAP, SAVLIB de varias bibliotecas, SEQNBR, ENDOPT, SAV/RST del IFS, SAVSYS
+    const J = (r) => JSON.stringify(r);
+    const DEVT = 'TAPVRT01';
+    await cmd('LODIMGCLG IMGCLG(PRUEBACLG) OPTION(*UNLOAD)');
+    await cmd('DLTIMGCLG IMGCLG(PRUEBACLG) KEEP(*NO)');
+    await cmd("RMVDIR DIR('/backup/prueba') SUBTREE(*ALL)");
+    await cmd("RMVDIR DIR('/tmp/tapeifs') SUBTREE(*ALL)");
+    await cmd("RMVDIR DIR('/tmp/tapeifs2') SUBTREE(*ALL)");
+    for (const l of ['TAPLIB1', 'TAPLIB2', 'TAPLIB3']) await cmd(`DLTLIB LIB(${l})`);
+    await cmd('DLTUSRPRF USRPRF(TAPUSR)');
+    check('WRKCFGSTS: TAPVRT01 activo', /TAPVRT01\s+VARIED ON/.test(J(await cmd('WRKCFGSTS CFGTYPE(*DEV)'))));
+    check('CRTIMGCLG TYPE(*TAP)', ok(await cmd("CRTIMGCLG IMGCLG(PRUEBACLG) DIR('/backup/prueba') TYPE(*TAP) CRTDIR(*YES)")));
+    const e1 = await cmd('ADDIMGCLGE IMGCLG(PRUEBACLG) FROMFILE(*NEW) TOFILE(VOL001) IMGSIZ(100)');
+    const e2 = await cmd('ADDIMGCLGE IMGCLG(PRUEBACLG) FROMFILE(*NEW) TOFILE(VOL002) IMGSIZ(100)');
+    check('ADDIMGCLGE *NEW (dos volúmenes)', ok(e1) && ok(e2), [e1, e2]);
+    check('sin catálogo cargado no hay volumen', errId(await cmd(`INZTAP DEV(${DEVT}) NEWVOL(VOL001) CHECK(*NO)`)) === 'CPF9898');
+    check('LODIMGCLG', ok(await cmd(`LODIMGCLG IMGCLG(PRUEBACLG) DEV(${DEVT})`)));
+    check('WRKIMGCLGE: VOL001 montado', /VOL001\s+VOL001.*|Mounted\s+VOL001/.test(J(await cmd('WRKIMGCLGE IMGCLG(PRUEBACLG)'))));
+    check('INZTAP', ok(await cmd(`INZTAP DEV(${DEVT}) NEWVOL(VOL001) CHECK(*NO)`)));
+    for (const l of ['TAPLIB1', 'TAPLIB2']) {
+      await cmd(`CRTLIB LIB(${l})`);
+      await sql(`CREATE TABLE ${l}.DATOS (ID INT NOT NULL PRIMARY KEY, NOMBRE VARCHAR(20))`);
+      await sql(`INSERT INTO ${l}.DATOS VALUES (1, 'uno'), (2, 'dos'), (3, '${l}')`);
+      await cmd(`CRTDTAARA DTAARA(${l}/AREA) TYPE(*CHAR) LEN(10) VALUE(${l})`);
+    }
+    const s1 = await cmd(`SAVLIB LIB(TAPLIB1 TAPLIB2) DEV(${DEVT})`);
+    check('SAVLIB de dos bibliotecas a cinta: un archivo por biblioteca', ok(s1) && s1.messages.filter((m) => m.id === 'CPC3722').length === 2, s1);
+    const s2 = await cmd(`SAVSECDTA DEV(${DEVT})`);
+    const t1 = J(await cmd(`DSPTAP DEV(${DEVT})`));
+    check('DSPTAP: TAPLIB1 (1), TAPLIB2 (2), QFILEUPR (3)', ok(s2) && /1\s+TAPLIB1\s+SAVLIB/.test(t1) && /2\s+TAPLIB2\s+SAVLIB/.test(t1) && /3\s+QFILEUPR\s+SAVSECDTA/.test(t1), t1);
+    check('INZTAP CHECK(*YES) con archivos activos: error', /Active files exist/.test(J(await cmd(`INZTAP DEV(${DEVT}) CHECK(*YES)`))));
+    const t2 = J(await cmd(`DSPTAP DEV(${DEVT}) SEQNBR(2) DATA(*SAVRST)`));
+    check('DSPTAP DATA(*SAVRST): objetos del archivo', /DATOS\s+\*FILE/.test(t2) && /AREA\s+\*DTAARA/.test(t2), t2);
+    await cmd('DLTLIB LIB(TAPLIB2)');
+    const r1 = await cmd(`RSTLIB SAVLIB(TAPLIB2) DEV(${DEVT})`);
+    const q1 = await sql('SELECT NOMBRE FROM TAPLIB2.DATOS WHERE ID = 3');
+    check('RSTLIB desde cinta (busca la etiqueta TAPLIB2)', ok(r1) && q1.data && q1.data[0].NOMBRE === 'TAPLIB2', [r1, q1]);
+    await cmd('CRTLIB LIB(TAPLIB3)');
+    const r2 = await cmd(`RSTOBJ OBJ(*ALL) SAVLIB(TAPLIB1) DEV(${DEVT}) SEQNBR(1) RSTLIB(TAPLIB3)`);
+    const q2 = await sql('SELECT COUNT(*) AS N FROM TAPLIB3.DATOS');
+    check('RSTOBJ SEQNBR(1) RSTLIB(otra)', ok(r2) && q2.data && q2.data[0].N === 3, [r2, q2]);
+    check('RSTLIB de una biblioteca que no está en el volumen: CPF3780', errId(await cmd(`RSTLIB SAVLIB(NOEXISTE) DEV(${DEVT})`)) === 'CPF3780');
+    // SEQNBR(2): se escribe en la posición 2 y lo de detrás deja de existir
+    await cmd(`SAVLIB LIB(TAPLIB1) DEV(${DEVT}) SEQNBR(2)`);
+    const t3 = J(await cmd(`DSPTAP DEV(${DEVT})`));
+    check('SAVLIB SEQNBR(2) sobrescribe el resto de la cinta', /2\s+TAPLIB1/.test(t3) && !/QFILEUPR/.test(t3), t3);
+    // SAV / RST del IFS
+    await cmd("MKDIR DIR('/tmp/tapeifs')");
+    await api('PUT', '/ifs/tmp/tapeifs/a.txt', 'contenido A', SECOFR, 'text/plain');
+    await cmd("CHGAUT OBJ('/tmp/tapeifs/a.txt') USER(*PUBLIC) DTAAUT(*R)");
+    const sv = await cmd(`SAV DEV('/QSYS.LIB/${DEVT}.DEVD') OBJ(('/tmp/tapeifs'))`);
+    check('SAV a cinta', ok(sv) && /objects saved/.test(J(sv)), sv);
+    await cmd("RMVDIR DIR('/tmp/tapeifs') SUBTREE(*ALL)");
+    const rs = await cmd(`RST DEV('/QSYS.LIB/${DEVT}.DEVD') OBJ(('/tmp/tapeifs'))`);
+    const fa = await fetch(`${BASE}/api/v1/ifs/tmp/tapeifs/a.txt`, { headers: SECOFR }).then((r) => r.text());
+    check('RST: contenido y autorizaciones del IFS', ok(rs) && fa === 'contenido A' && /\*PUBLIC\s+\*R\b/.test(J(await cmd("DSPAUT OBJ('/tmp/tapeifs/a.txt')"))), [rs, fa]);
+    const rn = await cmd(`RST DEV('/QSYS.LIB/${DEVT}.DEVD') OBJ(('/tmp/tapeifs' *INCLUDE '/tmp/tapeifs2'))`);
+    check('RST con nombre nuevo', ok(rn) && (await fetch(`${BASE}/api/v1/ifs/tmp/tapeifs2/a.txt`, { headers: SECOFR }).then((r) => r.text())) === 'contenido A', rn);
+    await cmd('CRTSAVF FILE(TAPLIB1/IFSSAVF)');
+    const sf = await cmd("SAV DEV('/QSYS.LIB/TAPLIB1.LIB/IFSSAVF.FILE') OBJ(('/tmp/tapeifs'))");
+    check('SAV a un *SAVF y DSPSAVF', ok(sf) && /\/tmp\/tapeifs\/a\.txt/.test(J(await cmd('DSPSAVF FILE(TAPLIB1/IFSSAVF)'))), sf);
+    check('SAVLIB *ALLUSR a un SAVF: no', errId(await cmd('SAVLIB LIB(*ALLUSR) DEV(*SAVF) SAVF(TAPLIB1/IFSSAVF)')) === 'CPF3782');
+    // ENDOPT(*UNLOAD): se descarga el volumen y se monta el siguiente del catálogo
+    const su = await cmd(`SAVLIB LIB(TAPLIB3) DEV(${DEVT}) ENDOPT(*UNLOAD)`);
+    const ce = J(await cmd('WRKIMGCLGE IMGCLG(PRUEBACLG)'));
+    check('ENDOPT(*UNLOAD) monta VOL002', ok(su) && /Mounted\s+VOL002/.test(ce) && /Loaded\s+VOL001/.test(ce), [su, ce]);
+    check('LODIMGCLGE *MOUNT vuelve a VOL001', ok(await cmd('LODIMGCLGE IMGCLG(PRUEBACLG) IMGCLGIDX(1) OPTION(*MOUNT)')) && /Mounted\s+VOL001/.test(J(await cmd('WRKIMGCLGE IMGCLG(PRUEBACLG)'))));
+    check('VOL(…) distinto del montado: error', /VOL002 expected/.test(J(await cmd(`SAVLIB LIB(TAPLIB3) DEV(${DEVT}) VOL(VOL002)`))));
+    // SAVSYS y permisos
+    await cmd("CRTUSRPRF USRPRF(TAPUSR) PASSWORD(TAPUSR) USRCLS(*USER)");
+    check('SAVSYS sin *SAVSYS: no', /\*SAVSYS required/.test(J(await cmd(`SAVSYS DEV(${DEVT})`, auth('TAPUSR')))));
+    const ss = await cmd(`SAVSYS DEV(${DEVT})`);
+    const t4 = J(await cmd(`DSPTAP DEV(${DEVT})`));
+    check('SAVSYS: QFILE, QFILEUPR y QFILEIOC desde el principio del volumen', ok(ss) && /1\s+QFILE\s+SAVSYS/.test(t4) && /2\s+QFILEUPR/.test(t4) && /3\s+QFILEIOC/.test(t4) && !/TAPLIB/.test(t4), [ss, t4]);
+    const ru = await cmd(`RSTUSRPRF DEV(${DEVT}) USRPRF(TAPUSR)`);
+    check('RSTUSRPRF desde el SAVSYS y RSTAUT sin SAVF', ok(ru) && ok(await cmd('RSTAUT USRPRF(TAPUSR)')), ru);
+    check('VRYCFG *OFF con catálogo cargado: no', /unload it first/.test(J(await cmd(`VRYCFG CFGOBJ(${DEVT}) CFGTYPE(*DEV) STATUS(*OFF)`))));
+    check('LODIMGCLG *UNLOAD', ok(await cmd('LODIMGCLG IMGCLG(PRUEBACLG) OPTION(*UNLOAD)')));
+    check('DLTIMGCLG KEEP(*NO)', ok(await cmd('DLTIMGCLG IMGCLG(PRUEBACLG) KEEP(*NO)')));
+    for (const l of ['TAPLIB1', 'TAPLIB2', 'TAPLIB3']) await cmd(`DLTLIB LIB(${l})`);
+    for (const d of ['/tmp/tapeifs', '/tmp/tapeifs2', '/backup/prueba']) await cmd(`RMVDIR DIR('${d}') SUBTREE(*ALL)`);
+    await cmd('DLTUSRPRF USRPRF(TAPUSR)');
+  }
+
   if (!failed) await cmd(`DLTLIB LIB(${LIB})`);
   console.log(failed ? `\n${failed} FALLOS` : '\nTodo correcto');
   process.exit(failed ? 1 : 0);

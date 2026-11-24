@@ -260,7 +260,8 @@ compileDef('CRTRPGPGM', 'Create RPG Program', 'RPG', 'PGM', 'QRPGSRC');
 // COMMIT: en IBM i el valor por omisión es *CHG, que sobre tablas sin diario da SQL7008; aquí las tablas no se registran
 // por diario, así que el valor por omisión es *NONE y *CHG/*CS/*ALL/*RR activan el control de compromiso como SET OPTION.
 compileDef('CRTSQLRPGI', 'Create SQL ILE RPG Object', 'SQLRPGLE', 'OBJ', 'QRPGLESRC', [P('OBJTYPE', 'Compile type', 'name', 10, { dft: '*PGM', choices: '*PGM, *MODULE, *SRVPGM' }),
-  P('COMMIT', 'Commitment control', 'name', 6, { dft: '*NONE', choices: '*CHG, *UR, *CS, *ALL, *RS, *RR, *NONE, *NC' }), ...BND]);
+  // Como en IBM i, COMMIT(*CHG) por omisión: modificar una tabla sin diario da SQL7008 (COMMIT(*NONE) para tablas sin diario)
+  P('COMMIT', 'Commitment control', 'name', 6, { dft: '*CHG', choices: '*CHG, *UR, *CS, *ALL, *RS, *RR, *NONE, *NC' }), ...BND]);
 compileDef('CRTBNDCL', 'Create Bound CL Program', 'CLLE', 'PGM', 'QCLLESRC');
 
 // CVTRPGSRC: RPG III / RPG/400 / RPG II → ILE RPG (RPG IV) en columnas fijas
@@ -372,9 +373,17 @@ def('ENDJOB', 'End Job', [P('JOB', 'Job name (number/user/name)', 'char', 28, { 
 
 // ---------- SQL y datos ----------
 def('STRSQL', 'Start SQL Interactive Session', [], async (ctx) => strsql(ctx), I);
-def('RUNSQL', 'Run SQL Statement', [P('SQL', 'SQL statement', 'sql', 512, { req: true, promptLen: 120 }), P('COMMIT', 'Commitment control', 'char', 5, { dft: '*NONE' })], async (ctx, a) => {
-  const r = await ctx.sql(a.SQL);
-  if (r.error) throw Object.assign(new CLError('CPF9898', `SQL${Math.abs(r.sqlcode || 0)}: ${r.error}`), { msgId: 'SQL9010' });
+def('RUNSQL', 'Run SQL Statement', [P('SQL', 'SQL statement', 'sql', 512, { req: true, promptLen: 120 }), P('COMMIT', 'Commitment control', 'name', 6, { dft: '*CHG', choices: '*CHG, *UR, *CS, *ALL, *RS, *NONE, *NC' }), P('NAMING', 'Naming', 'name', 4, { dft: '*SYS', choices: '*SYS, *SQL' })], async (ctx, a) => {
+  // COMMIT(*CHG…): la sentencia se ejecuta bajo control de compromiso y se confirma al terminar (si el trabajo ya
+  // tiene control de compromiso activo, la decide el propio trabajo)
+  const useTx = a.COMMIT !== '*NONE' && a.COMMIT !== '*NC' && !ctx.job.cmt;
+  if (useTx) await ctx.startCommit(a.COMMIT);
+  let r;
+  try {
+    r = await ctx.sql(a.SQL);
+    if (useTx) { if (r.error) await ctx.rollback(); else await ctx.commit(); }
+  } finally { if (useTx) await ctx.endCommit().catch(() => {}); }
+  if (r.error) throw Object.assign(new CLError('CPF9898', `SQL${Math.abs(r.sqlcode || 0)}: ${r.error}`), { msgId: r.sqlcode === -7008 ? 'SQL7008' : 'SQL9010' });
   return { id: 'SQL7954', text: r.columns.length ? `${r.rows.length} rows selected.` : `${r.rowCount} rows affected.`, sev: 0 };
 });
 def('DSPPFM', 'Display Physical File Member', [LIBQ('FILE', 'File'), P('MBR', 'Member', 'name', 10, { dft: '*FIRST' })], async (ctx, a) => { await dsppfm(ctx, a.FILE); }, I);
