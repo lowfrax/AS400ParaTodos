@@ -331,3 +331,34 @@ export function privileges(p) {
   const l = authorityList(p);
   return l.users.map((u) => ({ user: u.user, dta: dtaLabel(u), obj: u.obj, owner: l.owner, pgp: l.pgp, autl: l.autl }));
 }
+
+// ---------- Salvar y restaurar (SAV/RST, SAVSECDTA/RSTAUT) ----------
+/** Entrada propia de una ruta para guardarla en un salvado (null si hereda). */
+export function exportMeta(p) {
+  const m = meta.get(p);
+  if (!m) return null;
+  return { owner: m.owner, pgp: m.pgp, autl: m.autl, auth: [...m.auth].map(([u, a]) => [u, a.autl ? '*AUTL' : dtaName(a.dta), objStr(a.obj)]) };
+}
+/** Restaura la entrada de una ruta; el propietario que no existe pasa a ser `fallbackOwner`. */
+export async function importMeta(p, m, { ownerExists = () => true, fallbackOwner = 'QSECOFR' } = {}) {
+  if (!m || !loaded) return;
+  const auth = new Map();
+  for (const [u, d, o] of m.auth || []) auth.set(u, d === '*AUTL' ? { dta: new Set(), obj: new Set(), autl: true } : { dta: dtaSet(d), obj: objSet(o) });
+  await setMeta(p, { owner: (await ownerExists(m.owner)) ? m.owner : fallbackOwner, pgp: m.pgp || '*NONE', autl: m.autl || '*NONE', auth });
+}
+/** RSTAUT: autorizaciones privadas del IFS guardadas por SAVSECDTA/SAVSYS, de las rutas que existen. */
+export async function restoreRows({ objects = [], auth = [] } = {}, users = ['*ALL'], exists = () => true) {
+  if (!loaded) return 0;
+  const all = users.includes('*ALL');
+  let n = 0;
+  for (const o of objects) {
+    if (!(await exists(o.PATH))) continue;
+    const cur = own(o.PATH);
+    for (const a of auth.filter((x) => x.PATH === o.PATH && x.USR !== '*PUBLIC' && (all || users.includes(x.USR)))) {
+      cur.auth.set(a.USR, { dta: dtaSet(a.DTA), obj: objSet(a.OBJ) });
+      n++;
+    }
+    await persist(o.PATH);
+  }
+  return n;
+}

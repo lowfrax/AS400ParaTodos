@@ -1,6 +1,7 @@
 // Menús del sistema (GO MAIN, GO PROGRAM, …) con sus opciones reales.
 import { showMenu } from './common.js';
 import { CLError } from '../messages.js';
+import { saveOption } from './savemenu.js';
 
 export const MENUS = {
   MAIN: {
@@ -47,7 +48,7 @@ export const MENUS = {
       [5, 'Printing', 'WRKSPLF SELECT(*ALL)'],
       [6, 'Programming', 'GO PROGRAM'],
       [7, 'System control', 'WRKSYSVAL'],
-      [8, 'Device configuration', null],
+      [8, 'Device configuration', 'WRKCFGSTS CFGTYPE(*DEV)'],
       [10, 'Communications', null],
       [11, 'Subsystems', 'WRKSBS'],
     ],
@@ -108,6 +109,44 @@ export const MENUS = {
     title: 'Problem Handling',
     options: [[1, 'Work with problems', null], [2, 'Display job log', 'DSPJOBLOG'], [3, 'Display system operator messages', 'DSPMSG QSYSOPR']],
     bottomOptions: [[90, 'Sign off', 'SIGNOFF']],
+  },
+  SAVE: {
+    title: 'Save',
+    options: [
+      [1, 'Files', '?SAVOBJ OBJTYPE(*FILE)'],
+      [2, 'Libraries', '?SAVLIB'],
+      [4, 'Programs', '?SAVOBJ OBJTYPE(*PGM)'],
+      [5, 'Other objects', '?SAVOBJ'],
+      [6, 'Changed objects only', '?SAVCHGOBJ'],
+      [8, 'Security data', '?SAVSECDTA'],
+      [10, 'Configuration', '?SAVCFG'],
+      [11, 'Objects in directories', '?SAV'],
+      [null],
+      [21, 'Entire system', saveOption('SAVE21', 'Save entire system')],
+      [22, 'System data only', saveOption('SAVE22', 'Save system data only')],
+      [23, 'All user data', saveOption('SAVE23', 'Save all user data')],
+      [40, 'All libraries other than the system library', '?SAVLIB LIB(*NONSYS)'],
+      [42, 'All user libraries', '?SAVLIB LIB(*ALLUSR)'],
+    ],
+  },
+  RESTORE: {
+    title: 'Restore',
+    options: [
+      [1, 'Files', '?RSTOBJ OBJTYPE(*FILE)'],
+      [2, 'Libraries', '?RSTLIB'],
+      [4, 'Programs', '?RSTOBJ OBJTYPE(*PGM)'],
+      [5, 'Other objects', '?RSTOBJ'],
+      [8, 'Security data', '?RSTUSRPRF'],
+      [9, 'Authorities', '?RSTAUT'],
+      [10, 'Configuration', '?RSTCFG'],
+      [11, 'Objects in directories', '?RST'],
+      [null],
+      [21, 'System and user data', null],
+      [22, 'System data only', saveOption('RESTORE22', 'Restore system data only')],
+      [23, 'All user data', saveOption('RESTORE23', 'Restore all user data')],
+      [40, 'All libraries other than the system library', '?RSTLIB SAVLIB(*NONSYS)'],
+      [42, 'All user libraries', '?RSTLIB SAVLIB(*ALLUSR)'],
+    ],
   },
   INFO: { title: 'Information Assistant Options', options: [[1, 'Where to find information', null], [2, 'How to use help', null]], bottomOptions: [[90, 'Sign off', 'SIGNOFF']] },
   CAACCESS: { title: 'IBM i Access Tasks', options: [[1, 'Copy data to/from PC', null], [2, 'Work with IBM i Access', null]], bottomOptions: [[90, 'Sign off', 'SIGNOFF']] },

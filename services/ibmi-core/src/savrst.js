@@ -136,6 +136,16 @@ async function saveObject(row, { pvtaut = false } = {}) {
 export async function saveToSavf(job, lib, sel, savfLib, savfName, { clear = '*NONE', pvtaut = false, cmd = 'SAVOBJ', libDesc = false, append = false } = {}) {
   const info = await savfInfo(savfLib, savfName);
   if (info.entries && info.entries.length && clear === '*NONE' && !append) throw new CLError('CPF3782', `Save file ${savfName} in ${savfLib} already contains data; specify CLEAR(*ALL).`);
+  const prev = append && info.entries && info.entries.length ? readSavfContent(savfLib, savfName) : null;
+  const b = await buildLibSave(job, lib, sel, { pvtaut, cmd, libDesc, exclude: { lib: savfLib, name: savfName } });
+  if (prev) { b.content.objects = [...prev.objects, ...b.content.objects]; if (!b.content.library) b.content.library = prev.library || null; }
+  await writeSavf(savfLib, savfName, b.content, { entries: b.content.objects.map(entryOf), header: b.header, savedAt: b.header.savedAt });
+  await markSaved(b, `${savfLib}/${savfName}`);
+  return { count: b.objs.length };
+}
+
+/** Contenido salvado de una biblioteca (para un *SAVF o un archivo de cinta). */
+export async function buildLibSave(job, lib, sel, { pvtaut = false, cmd = 'SAVOBJ', libDesc = false, exclude = null } = {}) {
   if (!(await libExists(lib))) throw new CLError('CPF2110', lib);
   // Las tablas y vistas creadas por SQL (o por DRDA/JDBC) son objetos *FILE aunque aún no estén en el catálogo
   await (await import('./objects.js')).syncSqlTables(lib).catch(() => {});
@@ -144,20 +154,22 @@ export async function saveToSavf(job, lib, sel, savfLib, savfName, { clear = '*N
   const types = sel.types.map((x) => String(x).toUpperCase());
   const match = (r) => (names.includes('*ALL') || names.includes(r.NAME) || names.some((n) => n.endsWith('*') && r.NAME.startsWith(n.slice(0, -1))))
     && (types.includes('*ALL') || types.includes(r.TYPE))
-    && !(r.LIB === savfLib && r.NAME === savfName && r.TYPE === '*FILE')
+    && !(exclude && r.LIB === exclude.lib && r.NAME === exclude.name && r.TYPE === '*FILE')
     && (!sel.changedSince || new Date(String(r.CHANGED).replace(' ', 'T')) > sel.changedSince);
   const objs = [];
   for (const r of rows.filter(match)) objs.push(await saveObject(r, { pvtaut }));
   if (!objs.length && !libDesc) throw new CLError('CPF3770', lib);
-  const prev = append && info.entries && info.entries.length ? readSavfContent(savfLib, savfName) : null;
   const libRow = (await gw.rows("SELECT NAME, ATTR, TEXT, OWNER, DATA FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB'", [lib]))[0];
   const header = { release: SYS.release || 'V7R5M0', system: SYS.name, savedAt: new Date().toISOString(), savedBy: job ? job.user : 'QSYS', job: job ? qualifiedJob(job) : '', cmd, lib };
-  const content = { format: SAVE_FORMAT, header, library: libDesc ? { name: lib, attr: libRow.ATTR, text: libRow.TEXT, owner: libRow.OWNER, data: libRow.DATA ? JSON.parse(libRow.DATA) : null } : prev?.library || null, objects: [...(prev ? prev.objects : []), ...objs] };
-  await writeSavf(savfLib, savfName, content, { entries: content.objects.map(entryOf), header, savedAt: header.savedAt });
-  // Fecha del último salvado de la biblioteca (SAVCHGOBJ REFDATE(*SAVLIB)) y secuencia de diario de cada archivo
+  const content = { format: SAVE_FORMAT, header, library: libDesc ? { name: lib, attr: libRow.ATTR, text: libRow.TEXT, owner: libRow.OWNER, data: libRow.DATA ? JSON.parse(libRow.DATA) : null } : null, objects: objs };
+  return { content, objs, header, lib, libRow };
+}
+
+/** Tras salvar: fecha del último salvado de la biblioteca (SAVCHGOBJ REFDATE(*SAVLIB)) y secuencia de diario de cada archivo. */
+export async function markSaved({ lib, libRow, header, objs }, where) {
   const ld = libRow.DATA ? JSON.parse(libRow.DATA) : {};
   ld.lastSave = header.savedAt;
-  ld.lastSaveSavf = `${savfLib}/${savfName}`;
+  ld.lastSaveSavf = where;
   await gw.exec("UPDATE QSYS.OBJECTS SET DATA = ? WHERE LIB = 'QSYS' AND NAME = ? AND TYPE = '*LIB'", [JSON.stringify(ld), lib]);
   for (const o of objs) {
     if (!o.journal) continue;
@@ -165,7 +177,6 @@ export async function saveToSavf(job, lib, sel, savfLib, savfName, { clear = '*N
     d.lastSaveSeq = o.journal.lastSaveSeq;
     await gw.exec("UPDATE QSYS.OBJECTS SET DATA = ? WHERE LIB = ? AND NAME = ? AND TYPE = '*FILE'", [JSON.stringify(d), o.lib, o.name]);
   }
-  return { count: objs.length };
 }
 
 // ---------- Restaurar ----------
@@ -250,9 +261,14 @@ async function restoreObject(job, o, lib, { mbropt = '*MATCH' } = {}) {
 }
 
 /** Restaura de un *SAVF. sel = { names, types, savlib }. Devuelve { restored, skipped, failed: [] }. */
-export async function restoreFromSavf(job, savfLib, savfName, sel, { rstlib = null, mbropt = '*MATCH', createLib = false } = {}) {
+export async function restoreFromSavf(job, savfLib, savfName, sel, opts = {}) {
   const c = readSavfContent(savfLib, savfName);
   if (!c || !c.objects) throw new CLError('CPF3782', `File ${savfName} in ${savfLib} does not contain save data.`);
+  return restoreContent(job, c, sel, opts);
+}
+
+/** Restaura del contenido de un *SAVF o de un archivo de cinta. */
+export async function restoreContent(job, c, sel, { rstlib = null, mbropt = '*MATCH', createLib = false } = {}) {
   const savlib = String(sel.savlib || c.header.lib).toUpperCase();
   if (savlib !== c.header.lib && !c.objects.some((o) => o.lib === savlib)) throw new CLError('CPF3781', savlib);
   const lib = rstlib && rstlib !== '*SAVLIB' ? rstlib : savlib;
@@ -286,20 +302,31 @@ export async function restoreFromSavf(job, savfLib, savfName, sel, { rstlib = nu
 
 // ---------- Datos de seguridad (SAVSECDTA / RSTUSRPRF / RSTAUT) ----------
 export async function saveSecurity(job, savfLib, savfName) {
+  const { content, users, auts } = await buildSecurity(job);
+  await writeSavf(savfLib, savfName, content, { entries: content.objects.map(entryOf), header: content.header, savedAt: content.header.savedAt });
+  return { users, auts };
+}
+export async function buildSecurity(job, cmd = 'SAVSECDTA') {
   const users = await gw.rows('SELECT * FROM QSYS.USRPRF ORDER BY NAME');
   const auts = await gw.rows('SELECT LIB, NAME, TYPE, USR, AUT FROM QSYS.OBJAUT');
   const autl = await gw.rows("SELECT NAME, TEXT, OWNER, DATA FROM QSYS.OBJECTS WHERE LIB = 'QSYS' AND TYPE = '*AUTL'");
-  const header = { release: SYS.release || 'V7R5M0', system: SYS.name, savedAt: new Date().toISOString(), savedBy: job ? job.user : 'QSYS', cmd: 'SAVSECDTA', lib: 'QSYS' };
+  const header = { release: SYS.release || 'V7R5M0', system: SYS.name, savedAt: new Date().toISOString(), savedBy: job ? job.user : 'QSYS', cmd, lib: 'QSYS' };
   const objects = users.map((u) => ({ lib: 'QSYS', name: u.NAME, type: '*USRPRF', attr: '', text: u.TEXT, owner: 'QSECOFR', profile: { ...u, CREATED: u.CREATED ? String(u.CREATED) : null, LASTSIGN: u.LASTSIGN ? String(u.LASTSIGN) : null } }));
   for (const l of autl) objects.push({ lib: 'QSYS', name: l.NAME, type: '*AUTL', attr: '', text: l.TEXT, owner: l.OWNER, data: l.DATA ? JSON.parse(l.DATA) : null });
-  const content = { format: SAVE_FORMAT, header, library: null, objects, privateAuthorities: auts };
-  await writeSavf(savfLib, savfName, content, { entries: objects.map(entryOf), header, savedAt: header.savedAt });
-  return { users: users.length, auts: auts.length };
+  // Autorizaciones del IFS (propietario, grupo primario, lista y privadas de cada ruta)
+  const ifsObj = await gw.rows('SELECT PATH, OWNER, PGP, AUTL FROM QSYS.IFSOBJ').catch(() => []);
+  const ifsAut = await gw.rows('SELECT PATH, USR, DTA, OBJ FROM QSYS.IFSAUT').catch(() => []);
+  const content = { format: SAVE_FORMAT, header, library: null, objects, privateAuthorities: auts, ifsAuthorities: { objects: ifsObj, auth: ifsAut } };
+  return { content, users: users.length, auts: auts.length };
 }
 
 export async function restoreProfiles(job, savfLib, savfName, names = ['*ALL']) {
   const c = readSavfContent(savfLib, savfName);
-  if (!c || c.header.cmd !== 'SAVSECDTA') throw new CLError('CPF3782', `File ${savfName} in ${savfLib} does not contain security data (SAVSECDTA).`);
+  if (!c || !['SAVSECDTA', 'SAVSYS'].includes(c.header.cmd)) throw new CLError('CPF3782', `File ${savfName} in ${savfLib} does not contain security data (SAVSECDTA).`);
+  return restoreProfilesContent(c, names);
+}
+export async function restoreProfilesContent(c, names = ['*ALL']) {
+  if (c.privateAuthorities) keepAuthorityReference(c);
   const sel = names.map((x) => String(x).toUpperCase());
   let n = 0;
   for (const o of c.objects) {
@@ -319,6 +346,9 @@ export async function restoreProfiles(job, savfLib, savfName, names = ['*ALL']) 
 export async function restoreAuthorities(savfLib, savfName, users = ['*ALL']) {
   const c = readSavfContent(savfLib, savfName);
   if (!c || !c.privateAuthorities) throw new CLError('CPF3782', `File ${savfName} in ${savfLib} does not contain security data (SAVSECDTA).`);
+  return restoreAuthoritiesContent(c, users);
+}
+export async function restoreAuthoritiesContent(c, users = ['*ALL']) {
   const sel = users.map((x) => String(x).toUpperCase());
   let n = 0;
   for (const a of c.privateAuthorities) {
@@ -328,6 +358,133 @@ export async function restoreAuthorities(savfLib, savfName, users = ['*ALL']) {
     await gw.sql('INSERT INTO QSYS.OBJAUT (LIB, NAME, TYPE, USR, AUT) VALUES (?, ?, ?, ?, ?)', [a.LIB, a.NAME, a.TYPE, a.USR, a.AUT]);
     n++;
   }
+  if (c.ifsAuthorities) n += await (await import('./ifsaut.js')).restoreRows(c.ifsAuthorities, sel, async (p) => !!(await ifs.stat(p)));
   (await import('./security.js')).invalidateAuth();
   return n;
+}
+
+// RSTUSRPRF guarda los datos de autorización restaurados para un RSTAUT posterior (como las tablas de
+// referencia de autorizaciones de IBM i)
+const RSTAUT_REF = '/QIBM/UserData/OS/RSTAUT/authref.json.gz';
+export function keepAuthorityReference(c) {
+  const p = ifs.real(RSTAUT_REF);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, zlib.gzipSync(Buffer.from(JSON.stringify({ privateAuthorities: c.privateAuthorities || [], ifsAuthorities: c.ifsAuthorities || null, header: c.header }))));
+}
+export function authorityReference() {
+  const p = ifs.real(RSTAUT_REF);
+  if (!fs.existsSync(p)) throw new CLError('CPF3782', 'No authority reference information. Restore user profiles with RSTUSRPRF first.');
+  return JSON.parse(zlib.gunzipSync(fs.readFileSync(p)).toString('utf8'));
+}
+
+// ---------- Contenido de un *SAVF ya construido (cinta → SAVF, SAV a un SAVF) ----------
+export async function writeSavfContent(lib, name, content) {
+  const entries = content.ifs ? content.ifs.map(ifsEntryOf) : content.objects.map(entryOf);
+  await writeSavf(lib, name, content, { entries, header: content.header, savedAt: content.header.savedAt });
+}
+const ifsEntryOf = (o) => ({ lib: '', name: o.path, type: o.dir ? '*DIR' : '*STMF', attr: '', text: '', owner: o.meta ? o.meta.owner : '', size: o.data ? Math.ceil(o.data.length * 0.75) : 0 });
+
+// ---------- SAV / RST: objetos del IFS ----------
+/** Rutas que no se salvan nunca: /QSYS.LIB (se salva con SAVLIB), los SAVF y los volúmenes de cinta virtual. */
+async function ifsOmitted() {
+  const out = ['/QSYS.LIB', '/QIBM/UserData/OS/SAVF'];
+  const { catalogs } = await import('./tape.js');
+  for (const c of await catalogs().catch(() => [])) if (c && c.data && c.data.dir) out.push(c.data.dir);
+  return out;
+}
+const isUnder = (p, root) => p === root || p.startsWith(root === '/' ? '/' : `${root}/`);
+function globRe(pat) { return new RegExp(`^${pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]')}$`); }
+
+/** Expande OBJ(('/ruta' *INCLUDE|*OMIT)…) a las rutas existentes (con patrones * ? en el último componente). */
+async function expandIfs(list) {
+  const inc = [];
+  for (const o of list.filter((x) => x.include !== false)) {
+    const p = ifs.normPath(o.path);
+    const base = p.slice(p.lastIndexOf('/') + 1);
+    if (/[*?]/.test(base)) {
+      const dir = p.slice(0, p.lastIndexOf('/')) || '/';
+      const re = globRe(base);
+      for (const e of await ifs.list(dir).catch(() => [])) if (re.test(e.name)) inc.push(e.path);
+    } else if (await ifs.stat(p)) inc.push(p);
+  }
+  return inc;
+}
+
+export async function buildIfsSave(job, objList, { subtree = '*ALL', cmd = 'SAV' } = {}) {
+  const aut = await import('./ifsaut.js');
+  const omit = [...(await ifsOmitted()), ...objList.filter((x) => x.include === false).map((x) => ifs.normPath(x.path))];
+  const omitRes = omit.filter((x) => /[*?]/.test(x)).map(globRe);
+  const skip = (p) => omit.some((r) => !/[*?]/.test(r) && isUnder(p, r)) || omitRes.some((re) => re.test(p));
+  const roots = (await expandIfs(objList)).filter((p) => !skip(p));
+  if (!roots.length) throw new CLError('CPF3782', 'No objects saved. Object paths not found.');
+  const seen = new Set();
+  const out = [];
+  const add = async (p) => {
+    if (seen.has(p) || skip(p)) return;
+    seen.add(p);
+    const st = await ifs.stat(p);
+    if (!st) return;
+    const item = { path: p, dir: st.dir, mtime: st.mtime, meta: aut.exportMeta(p) };
+    if (!st.dir) item.data = (await ifs.readFile(p)).toString('base64');
+    out.push(item);
+    if (st.dir && subtree !== '*NONE' && subtree !== '*OBJ') {
+      for (const e of await ifs.list(p)) if (subtree === '*ALL' || (subtree === '*DIR' && !e.dir)) await add(e.path);
+    }
+  };
+  for (const r of roots) {
+    // Los directorios padre se salvan como directorios (sin su contenido) para poder restaurar la ruta
+    for (let q = r.slice(0, r.lastIndexOf('/')); q && q !== ''; q = q.slice(0, q.lastIndexOf('/'))) if (!seen.has(q)) { seen.add(q); out.push({ path: q, dir: true, parent: true, meta: aut.exportMeta(q) }); }
+    await add(r);
+  }
+  out.sort((a, b) => a.path.localeCompare(b.path));
+  const header = { release: SYS.release || 'V7R5M0', system: SYS.name, savedAt: new Date().toISOString(), savedBy: job ? job.user : 'QSYS', job: job ? qualifiedJob(job) : '', cmd, lib: null };
+  return { format: SAVE_FORMAT, header, library: null, objects: [], ifs: out };
+}
+
+/**
+ * RST: objList = [{path, include, newName}] (vacío = todo); option = *ALL | *NEW | *OLD.
+ * Devuelve { restored, skipped, failed: [] }.
+ */
+export async function restoreIfs(job, c, objList, { option = '*ALL' } = {}) {
+  if (!c || !c.ifs) throw new CLError('CPF3782', 'The save media does not contain objects saved with SAV.');
+  const aut = await import('./ifsaut.js');
+  const incl = objList.filter((x) => x.include !== false);
+  const omit = objList.filter((x) => x.include === false).map((x) => ifs.normPath(x.path));
+  const target = (p) => {
+    if (omit.some((r) => isUnder(p, r))) return null;
+    if (!incl.length || incl.some((x) => x.path === '/*' || x.path === '/')) return p;
+    for (const x of incl) {
+      const r = ifs.normPath(x.path);
+      if (/[*?]/.test(r) ? globRe(r).test(p) || [...p.split('/').keys()].some((i) => globRe(r).test(p.split('/').slice(0, i + 1).join('/'))) : isUnder(p, r)) {
+        if (x.newName && x.newName !== '*SAME') return ifs.normPath(x.newName) + p.slice(r.length);
+        return p;
+      }
+    }
+    return null;
+  };
+  let restored = 0;
+  let skipped = 0;
+  const failed = [];
+  const owners = new Map();
+  const ownerExists = async (u) => { if (!owners.has(u)) owners.set(u, !!(await gw.rows('SELECT NAME FROM QSYS.USRPRF WHERE NAME = ?', [u])).length); return owners.get(u); };
+  for (const o of c.ifs) {
+    const to = target(o.path);
+    if (!to || to.startsWith('/QSYS.LIB')) continue;
+    try {
+      const real = ifs.real(to);
+      const exists = fs.existsSync(real);
+      if (o.parent) { if (!exists) { fs.mkdirSync(real, { recursive: true }); if (o.meta) await aut.importMeta(to, o.meta, { ownerExists }); } continue; }
+      if ((option === '*NEW' && exists) || (option === '*OLD' && !exists)) { skipped++; continue; }
+      if (o.dir) fs.mkdirSync(real, { recursive: true });
+      else {
+        fs.mkdirSync(path.dirname(real), { recursive: true });
+        fs.writeFileSync(real, Buffer.from(o.data || '', 'base64'));
+        if (o.mtime) { const t = new Date(o.mtime); fs.utimesSync(real, t, t); }
+      }
+      if (o.meta) await aut.importMeta(to, o.meta, { ownerExists, fallbackOwner: job ? job.user : 'QSECOFR' });
+      else if (!exists) await aut.created(to);
+      restored++;
+    } catch (e) { failed.push({ name: to, type: o.dir ? '*DIR' : '*STMF', error: e.message }); }
+  }
+  return { restored, skipped, failed };
 }

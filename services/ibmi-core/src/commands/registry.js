@@ -40,6 +40,8 @@ function normalize(p, raw) {
     }
     case 'list': return splitList(v).map((x) => (p.lc ? unquote(x) : unquote(x).toUpperCase()));
     case 'cmd': case 'sql': return unquote(v);
+    // Lista de elementos tal cual: OBJ(('/ruta' *INCLUDE) ('/otra' *OMIT)) o una ruta entre apóstrofos
+    case 'elem': return v;
     case 'text': return unquote(v);
     default: return p.lc ? unquote(v) : unquote(v).toUpperCase();
   }
@@ -88,6 +90,7 @@ export function rebuild(cmd, given) {
     const v = given[p.kw];
     if (v === undefined || v === '' || (p.dft !== undefined && String(v).toUpperCase() === String(p.dft).toUpperCase())) continue;
     let s = String(v).trim();
+    if (p.type === 'elem') { parts.push(`${p.kw}(${/^[('*]/.test(s) ? s : quote(s)})`); continue; }
     if ((p.type === 'text' || p.type === 'cmd' || p.type === 'sql' || /\s/.test(s)) && !s.startsWith("'") && p.type !== 'list' && !(p.type === 'cmd' && /^\w+$/.test(s))) s = quote(s);
     parts.push(`${p.kw}(${s})`);
   }
@@ -157,6 +160,7 @@ export async function promptCommand(ctx, cmd, given = {}, marked = new Set(Objec
         if (v) v = lib && lib !== (p.lib || '*LIBL') ? `${lib}/${v}` : (lib === (p.lib || '*LIBL') ? v : `${lib}/${v}`);
       }
       if (v !== '' && !(p.dft !== undefined && v.toUpperCase() === String(p.dft).toUpperCase() && !marked.has(p.kw))) {
+        if (p.type === 'elem' && !/^[('*]/.test(v)) v = quote(v);
         if (['text', 'cmd', 'sql'].includes(p.type) && !/^'.*'$/s.test(v) && !(p.type === 'text' && v.startsWith('*'))) v = quote(v);
         out[p.kw] = v;
       }
