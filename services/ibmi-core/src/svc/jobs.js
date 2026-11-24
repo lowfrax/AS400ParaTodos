@@ -27,7 +27,8 @@ const pool = new Map();
 export async function pooledCtx(kind, prf, opts = {}) {
   const key = `${kind}:${prf.NAME}`;
   const p = pool.get(key);
-  if (p && allJobs().includes(p.ctx.job)) { p.used = Date.now(); return p.ctx; }
+  // Cada petición se autentica de nuevo: el trabajo reutilizado toma el perfil actual (clase, grupo, autorizaciones especiales)
+  if (p && allJobs().includes(p.ctx.job)) { p.used = Date.now(); p.ctx.user = prf; return p.ctx; }
   const ctx = await serverCtx(prf, { name: kind, ...opts });
   pool.set(key, { ctx, used: Date.now() });
   return ctx;

@@ -14,6 +14,8 @@ import { listen } from './telnet.js';
 import { SYS } from '../system.js';
 import { libExists, createLibrary } from '../objects.js';
 import * as obj from '../objects.js';
+import { withCtx } from '../security.js';
+import * as ifsaut from '../ifsaut.js';
 
 const PASV_MIN = Number(process.env.FTP_PASV_MIN || 30000);
 const PASV_MAX = Number(process.env.FTP_PASV_MAX || 30009);
@@ -59,7 +61,7 @@ class FtpSession {
       while ((i = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, i).replace(/\r$/, '');
         buf = buf.slice(i + 1);
-        this.queue = this.queue.then(() => this.command(line)).catch((e) => this.reply(550, e.message || String(e)));
+        this.queue = this.queue.then(() => withCtx(this.ctx, () => this.command(line))).catch((e) => this.reply(550, e.message || String(e)));
       }
     };
     s.on('data', this.onData);
@@ -174,7 +176,7 @@ class FtpSession {
     const entries = st.dir ? await ifs.list(r.path) : [st];
     for (const e of entries) {
       if (namesOnly) { lines.push(e.name); continue; }
-      if (this.listfmt === 1) lines.push(`${ifs.modeString(e)}   1 ${'QSYS'.padEnd(8)} 0 ${String(e.size).padStart(12)} ${unixDate(e.mtime)} ${e.name}`);
+      if (this.listfmt === 1) lines.push(`${ifs.modeString(e)}   1 ${String(e.owner || 'QSYS').padEnd(8)} 0 ${String(e.size).padStart(12)} ${unixDate(e.mtime)} ${e.name}`);
       else lines.push(`${'QSYS'.padEnd(10)} ${String(e.size).padStart(11)} ${ibmDate(e.mtime)} ${(e.dir ? '*DIR' : '*STMF').padEnd(10)} ${e.name}${e.dir ? '/' : ''}`);
     }
     // /QSYS.LIB aparece en la raíz como en un IBM i real

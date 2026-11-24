@@ -1,6 +1,8 @@
 // QSH / PASE (subconjunto): intérprete de órdenes de estilo UNIX sobre el IFS y QSYS.LIB, con las utilidades
 // de IBM i "system" (ejecuta CL) y "db2" (ejecuta SQL). Lo usan SSH, REXEC ("qsh …"), STRQSH/QSH y la API REST.
 import * as ifs from '../ifs.js';
+import * as ifsaut from '../ifsaut.js';
+import { withCtx, currentCtx } from '../security.js';
 import { parseQsysPath, listQsys, readQsysMember, writeQsysMember } from '../qsyslib.js';
 import { runCmd } from '../svc/jobs.js';
 import { SYS, allJobs } from '../system.js';
@@ -38,6 +40,8 @@ export class Qsh {
 
   /** Ejecuta una línea (con |, ;, &&, > y >>). Devuelve {out, code, exit}. */
   async exec(line) {
+    // Las operaciones del IFS se hacen con el perfil del trabajo (autorizaciones de datos y de objeto)
+    if (currentCtx() !== this.ctx) return withCtx(this.ctx, () => this.exec(line));
     let toks;
     try { toks = tokenize(line.replace(/\$(\w+)|\$\{(\w+)\}/g, (_, a, b) => this.env[a || b] ?? (a === '?' ? String(this.last) : ''))); } catch (e) { return { out: `${e.message}\n`, code: 2 }; }
     // Separar por ; y &&
@@ -147,7 +151,7 @@ export class Qsh {
               if (p === '/') entries.unshift({ name: 'QSYS.LIB', dir: true, size: 0, mtime: new Date() });
             }
             if (!flags.has('a')) entries = entries.filter((e) => !e.name.startsWith('.'));
-            if (flags.has('l')) out += entries.map((e) => `${e.dir ? 'drwxrwsrwx' : '-rwxrwxrwx'}  1 ${String(e.owner || 'qsys').toLowerCase().padEnd(9)} 0 ${String(e.size).padStart(10)} ${fmtDate(e.mtime)} ${e.name}`).join('\n') + (entries.length ? '\n' : '');
+            if (flags.has('l')) out += entries.map((e) => `${e.path && !ifs.isQsys(e.path) ? ifsaut.modeString(e.path, e.dir) : e.dir ? 'drwxrwsrwx' : '-rwxrwxrwx'}  1 ${String(e.owner || 'qsys').toLowerCase().padEnd(9)} ${String(e.path && !ifs.isQsys(e.path) ? ifsaut.mode(e.path).group : 0).toLowerCase().padEnd(9)} ${String(e.size).padStart(10)} ${fmtDate(e.mtime)} ${e.name}`).join('\n') + (entries.length ? '\n' : '');
             else out += entries.map((e) => e.name).join(flags.has('1') ? '\n' : '  ') + (entries.length ? '\n' : '');
           }
           return ok(out);
@@ -170,6 +174,33 @@ export class Qsh {
           if (ifs.isQsys(to)) { const q = parseQsysPath(to); await writeQsysMember(q.lib, q.obj, q.mbr || q.obj, await this.readAny(from)); return ok(); }
           if (ifs.isQsys(from)) { await ifs.writeFile(to, await this.readAny(from)); return ok(); }
           await ifs.copy(from, to, { replace: true });
+          return ok();
+        }
+        case 'chmod': {
+          // chmod 750 archivo…  (modo octal: propietario, grupo primario y *PUBLIC → *RWX…)
+          const [m, ...files] = args;
+          if (!/^[0-7]{3,4}$/.test(m || '')) return err(`invalid mode: ${m || ''}`);
+          for (const f of files) {
+            const p = this.path(f);
+            if (!(await ifs.stat(p))) return err(`${f}: No such file or directory`);
+            await ifsaut.mayManage(p);
+            await ifsaut.chmod(p, parseInt(m, 8) & 0o777);
+          }
+          return ok();
+        }
+        case 'chown': case 'chgrp': {
+          const [who, ...files] = args;
+          const { getUser } = await import('../objects.js');
+          const { hasSpecial } = await import('../security.js');
+          const name = String(who || '').toUpperCase();
+          if (!(await getUser(name))) return err(`${who}: Invalid user`);
+          for (const f of files) {
+            const p = this.path(f);
+            if (!(await ifs.stat(p))) return err(`${f}: No such file or directory`);
+            const owner = ifsaut.metaOf(p).owner;
+            if (!hasSpecial(this.ctx.user, '*ALLOBJ') && owner !== this.ctx.job.user) return err(`${f}: Permission denied`);
+            if (cmd === 'chown') await ifsaut.changeOwner(p, name); else await ifsaut.changePgp(p, name);
+          }
           return ok();
         }
         case 'touch': for (const f of args) { const p = this.path(f); if (!(await ifs.stat(p))) await ifs.writeFile(p, ''); } return ok();

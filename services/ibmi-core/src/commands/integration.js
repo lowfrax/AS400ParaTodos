@@ -359,7 +359,7 @@ def('WRKLNK', 'Work with Object Links', [P('OBJ', 'Object', 'text', 256, { dft: 
     p.info(3, 2, 'Directory', dir.slice(-60), 18);
     p.text(5, 2, 'Type options, press Enter.', 'b');
     p.text(6, 4, '2=Edit   3=Copy   4=Remove   5=Display   7=Rename   8=Display attributes', 'b');
-    p.text(7, 4, '11=Change current directory ...', 'b');
+    p.text(7, 4, '9=Work with authority   11=Change current directory ...', 'b');
     p.text(9, 2, 'Opt   Object link            Type     Attribute    Text', 'w');
     entries.slice(page * per, page * per + per).forEach((e, i) => {
       p.input(`OPT${i}`, 10 + i, 3, 2, {});
@@ -384,6 +384,7 @@ def('WRKLNK', 'Work with Object Links', [P('OBJ', 'Object', 'text', 256, { dft: 
         if (o === '5') { if (e.dir) { dir = e.path; page = 0; } else await runCommand(ctx, `DSPF STMF('${e.path}')`); }
         else if (o === '2' && !e.dir) await runCommand(ctx, `EDTF STMF('${e.path}')`);
         else if (o === '4') { if (e.dir) await ifs.rmdir(e.path); else await ifs.unlink(e.path); message = `Object ${e.name} removed.`; }
+        else if (o === '9') await runCommand(ctx, `WRKAUT OBJ('${e.path}')`);
         else if (o === '11' && e.dir) { ctx.job.cwd = e.path; message = msgText('CPCA081'); }
         else if (o === '8') message = `${e.path}: ${e.type}, ${e.size ?? 0} bytes, changed ${e.mtime ? new Date(e.mtime).toISOString().slice(0, 19).replace('T', ' ') : ''}`;
       } catch (err) { message = { id: err.msgId, text: err.message, sev: 40 }; }

@@ -176,14 +176,14 @@ Implementado y comprobado contra Db2 real: TN5250 (ACS, tn5250j), FTP/FTPS (tamb
 host de jt400/ODBC, DRDA, REST/IWS, Mapepire, SSH/SFTP, SMTP; RPG II/III/IV/libre con el ciclo, ILE, archivos
 lógicos, de impresora y de pantalla, DS sobre bytes EBCDIC y de múltiples apariciones, SQL incrustado, control de
 compromiso con diarios (SQL7008 sin diario), colas de datos, archivos de mensajes, alteraciones, planificador,
-QTEMP por trabajo, seguridad de objetos (QSECURITY 40), salvar/restaurar en SAVF, mandatos de usuario, depurador,
+QTEMP por trabajo, seguridad de objetos (QSECURITY 40) también en el IFS (`CHGAUT`, `WRKAUT`, `DSPAUT`, `CHGOWN`,
+`CHGPGP`, `CPYAUT`, `chmod`/`chown` de QSH, `QSYS2.IFS_OBJECT_PRIVILEGES`), salvar/restaurar en SAVF, mandatos de usuario, depurador,
 Query/400, PDM, SEU, SDA y RLU. Diferencias que quedan, por la naturaleza del emulador:
 
 - No hay unidades de cinta ni óptico: salvar y restaurar usan archivos de salvar (`DEV(*SAVF)`); `SAVSYS` y las
   cintas no existen. Un SAVF contiene una sola biblioteca.
 - `CRTSQLRPGI` usa `COMMIT(*NONE)` por omisión (en IBM i es `*CHG`) para que los programas de ejemplo funcionen
   sobre tablas sin diario; con `COMMIT(*CHG)` el comportamiento es el de IBM i (SQL7008 si la tabla no está en un diario).
-- El IFS no tiene autorizaciones por objeto (`CHGAUT`/`WRKAUT`); la seguridad de objetos se aplica a `/QSYS.LIB`.
 - El depurador muestra el fuente del miembro aunque el programa se compile con `DBGVIEW(*STMT)` (solo `*NONE` impide depurar)
   y depura trabajos interactivos (no `STRSRVJOB`).
 - Las bibliotecas cuyo nombre empieza por `SYS` no se pueden crear (Db2 reserva esos esquemas).

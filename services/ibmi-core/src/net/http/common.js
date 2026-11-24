@@ -3,6 +3,7 @@ import { sendJson } from '../../../../../shared/http.js';
 import { authHttp, AuthError } from '../../svc/auth.js';
 import { pooledCtx, serverCtx, endServerCtx } from '../../svc/jobs.js';
 import { getUser } from '../../objects.js';
+import { withCtx } from '../../security.js';
 
 export const isSecofr = (prf) => ['*SECOFR', '*SECADM'].includes(prf?.USRCLS);
 
@@ -38,7 +39,7 @@ export async function freshCtx(prf, name = 'QZHBHTTP') {
 export { endServerCtx };
 
 export function fail(res, e, status) {
-  const st = status || e.status || (e instanceof AuthError ? 401 : e.msgId && /^CPF(9801|9811|9812|9815|2105|2110|4101)|^CPFA0A9/.test(e.msgId) ? 404 : e.msgId ? 400 : 500);
+  const st = status || e.status || (e instanceof AuthError ? 401 : e.msgId && /^CPF(9801|9811|9812|9815|2105|2110|4101)|^CPFA0A9/.test(e.msgId) ? 404 : e.msgId === 'CPFA09C' || e.msgId === 'CPF9802' ? 403 : e.msgId ? 400 : 500);
   if (st >= 500) console.error('[http]', e);
   return sendJson(res, st, { error: { id: e.msgId || e.sqlstate || 'CPF9898', text: e.message, ...(e.sqlstate ? { sqlstate: e.sqlstate, sqlcode: e.sqlcode } : {}) } });
 }
@@ -51,7 +52,7 @@ export function authed(h, opts = {}) {
     if (opts.secofr && !isSecofr(a.prf)) return sendJson(res, 403, { error: { id: 'CPF2189', text: 'Not authorized. User class *SECOFR required.' } });
     try {
       const ctx = a.prf ? await userCtx(a.prf) : null;
-      await h(req, res, { ...a, ctx });
+      await withCtx(ctx, () => h(req, res, { ...a, ctx }));
     } catch (e) { fail(res, e); }
   };
 }

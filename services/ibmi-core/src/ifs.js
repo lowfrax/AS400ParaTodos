@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { CLError } from './messages.js';
+import * as aut from './ifsaut.js';
 
 export const IFS_ROOT = path.resolve(process.env.IFS_ROOT || path.resolve('.ifs'));
 
@@ -31,7 +32,30 @@ export function initIfs() {
 export function homeDir(user) {
   const d = `/home/${String(user).toUpperCase()}`;
   try { fs.mkdirSync(real(d), { recursive: true }); } catch { /* ignorar */ }
+  aut.ensureHome(d, user).catch(() => {});
   return d;
+}
+
+const parentPath = (p) => (p === '/' ? '/' : p.slice(0, p.lastIndexOf('/')) || '/');
+/** Antes de crear p (y los directorios intermedios que falten): *WX sobre el directorio existente más cercano. */
+async function beforeCreate(p) {
+  let dir = parentPath(p);
+  const missing = [];
+  while (dir !== '/' && !fs.existsSync(real(dir))) { missing.unshift(dir); dir = parentPath(dir); }
+  await aut.check(dir, 'create');
+  return missing;
+}
+async function afterCreate(missing, p, opts) {
+  for (const d of missing) await aut.created(d).catch(() => {});
+  if (p) await aut.created(p, opts).catch(() => {});
+}
+/** Comprobación previa para quien abre la ruta directamente (SFTP): 'r', 'w' o creación. */
+export async function checkOpen(p, write) {
+  const n = normPath(p);
+  if (fs.existsSync(real(n))) { await aut.check(n, write ? 'w' : 'r'); return async () => {}; }
+  if (!write) return async () => {};
+  const missing = await beforeCreate(n);
+  return () => afterCreate(missing, n);
 }
 
 /** Normaliza una ruta IFS (absoluta o relativa al directorio actual). */
@@ -60,12 +84,14 @@ export function real(p) {
 export async function stat(p) {
   try {
     const st = await fsp.stat(real(p));
-    return { path: normPath(p), name: path.posix.basename(normPath(p)) || '/', dir: st.isDirectory(), size: st.size, mtime: st.mtime, ctime: st.birthtime || st.ctime, type: st.isDirectory() ? '*DIR' : '*STMF' };
+    const n = normPath(p);
+    return { path: n, name: path.posix.basename(n) || '/', dir: st.isDirectory(), size: st.size, mtime: st.mtime, ctime: st.birthtime || st.ctime, type: st.isDirectory() ? '*DIR' : '*STMF', owner: aut.metaOf(n).owner };
   } catch { return null; }
 }
 
 export async function list(p) {
   const dir = real(p);
+  if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) await aut.check(normPath(p), 'list');
   let names;
   try { names = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) {
     if (e.code === 'ENOTDIR') { const s = await stat(p); return s ? [s] : []; }
@@ -82,6 +108,7 @@ export async function list(p) {
 }
 
 export async function readFile(p) {
+  if (fs.existsSync(real(p))) await aut.check(normPath(p), 'r');
   try { return await fsp.readFile(real(p)); } catch (e) {
     if (e.code === 'EISDIR') throw new CLError('CPFA0AB', p, 'Object is a directory.');
     throw new CLError('CPFA0A9', p);
@@ -90,11 +117,16 @@ export async function readFile(p) {
 
 export async function writeFile(p, data, { append = false, replace = true } = {}) {
   const r = real(p);
-  if (!replace && fs.existsSync(r)) throw new CLError('CPFA0A0', p);
+  const n = normPath(p);
+  const exists = fs.existsSync(r);
+  if (!replace && exists) throw new CLError('CPFA0A0', p);
+  let missing = [];
+  if (exists) await aut.check(n, 'w'); else missing = await beforeCreate(n);
   try {
     await fsp.mkdir(path.dirname(r), { recursive: true });
     if (append) await fsp.appendFile(r, data); else await fsp.writeFile(r, data);
   } catch (e) { throw new CLError('CPFA0AB', p, e.message); }
+  if (!exists) await afterCreate(missing, n);
 }
 
 export function writeStream(p, { append = false } = {}) {
@@ -106,40 +138,64 @@ export function readStream(p, start = 0) { return fs.createReadStream(real(p), {
 
 export async function mkdir(p, { parents = false } = {}) {
   const r = real(p);
+  const n = normPath(p);
   if (fs.existsSync(r)) throw new CLError('CPFA0A0', p);
+  if (!parents && !fs.existsSync(path.dirname(r))) throw new CLError('CPFA0A9', p);
+  const missing = await beforeCreate(n);
   try { await fsp.mkdir(r, { recursive: parents }); } catch (e) { throw new CLError(e.code === 'ENOENT' ? 'CPFA0A9' : 'CPFA0AB', p, e.message); }
+  await afterCreate(missing, n);
 }
 
 export async function rmdir(p, { recursive = false } = {}) {
   const r = real(p);
   if (r === IFS_ROOT) throw new CLError('CPFA09C', p);
+  const n = normPath(p);
+  if (fs.existsSync(r)) {
+    await aut.check(n, 'delete');
+    // SUBTREE(*ALL): hace falta poder borrar cada objeto del subárbol
+    if (recursive) for (const e of await walk(n, 64)) await aut.check(e.path, 'delete');
+  }
   // fsp.rm sin recursive rechaza cualquier directorio (ERR_FS_EISDIR): un directorio vacío se borra con rmdir
   try { await (recursive ? fsp.rm(r, { recursive: true, force: false }) : fsp.rmdir(r)); } catch (e) {
     if (e.code === 'ENOENT') throw new CLError('CPFA0A9', p);
     if (e.code === 'ENOTEMPTY' || e.code === 'EEXIST') throw new CLError('CPFA0AB', p, 'Directory not empty.');
     throw new CLError('CPFA0AB', p, e.message);
   }
+  await aut.removed(n).catch(() => {});
 }
 
 export async function unlink(p) {
   const s = await stat(p);
   if (!s) throw new CLError('CPFA0A9', p);
   if (s.dir) throw new CLError('CPFA0AB', p, 'Object is a directory. Use RMVDIR.');
+  await aut.check(s.path, 'delete');
   await fsp.unlink(real(p));
+  await aut.removed(s.path).catch(() => {});
 }
 
 export async function rename(from, to) {
   if (!(await stat(from))) throw new CLError('CPFA0A9', from);
   if (await stat(to)) throw new CLError('CPFA0A0', to);
+  const f = normPath(from), t = normPath(to);
+  await aut.check(f, 'rename');
+  const missing = await beforeCreate(t);
   await fsp.mkdir(path.dirname(real(to)), { recursive: true });
   await fsp.rename(real(from), real(to));
+  await afterCreate(missing, null);
+  await aut.moved(f, t).catch(() => {});
 }
 
 export async function copy(from, to, { replace = false } = {}) {
   if (!(await stat(from))) throw new CLError('CPFA0A9', from);
-  if (!replace && (await stat(to))) throw new CLError('CPFA0A0', to);
+  const exists = !!(await stat(to));
+  if (!replace && exists) throw new CLError('CPFA0A0', to);
+  const f = normPath(from), t = normPath(to);
+  await aut.check(f, 'r');
+  let missing = [];
+  if (exists) await aut.check(t, 'w'); else missing = await beforeCreate(t);
   await fsp.mkdir(path.dirname(real(to)), { recursive: true });
   await fsp.copyFile(real(from), real(to));
+  if (!exists) await afterCreate(missing, t, { from: f });
 }
 
 /** Estadísticas para QSYS2.IFS_OBJECT_STATISTICS. */
@@ -156,4 +212,4 @@ export async function walk(p, depth = 1) {
 }
 
 /** Permisos estilo UNIX para listados FTP/QSH. */
-export function modeString(s) { return s.dir ? 'drwxrwsrwx' : '-rwxrwxrwx'; }
+export function modeString(s) { return aut.modeString(s.path || '/', s.dir); }

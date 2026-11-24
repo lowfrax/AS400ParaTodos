@@ -15,6 +15,8 @@ import { tagConnection } from './servers.js';
 import { listen } from './telnet.js';
 import { Qsh } from './qsh.js';
 import * as ifs from '../ifs.js';
+import * as ifsaut from '../ifsaut.js';
+import { withCtx } from '../security.js';
 import { parseQsysPath, listQsys, readQsysMember, writeQsysMember } from '../qsyslib.js';
 import { SYS, logJob } from '../system.js';
 
@@ -47,12 +49,14 @@ const S_IFDIR = 0o040000;
 const S_IFREG = 0o100000;
 function attrsOf(st) {
   const t = Math.floor((st.mtime ? new Date(st.mtime).getTime() : Date.now()) / 1000);
-  return { mode: (st.dir ? S_IFDIR | 0o755 : S_IFREG | 0o644), uid: 0, gid: 0, size: st.size || 0, atime: t, mtime: t };
+  const bits = st.path && !ifs.isQsys(st.path) ? ifsaut.mode(st.path).bits : st.dir ? 0o755 : 0o644;
+  return { mode: (st.dir ? S_IFDIR : S_IFREG) | bits, uid: 0, gid: 0, size: st.size || 0, atime: t, mtime: t };
 }
 function longname(name, st, user) {
   const d = st.mtime ? new Date(st.mtime) : new Date();
   const mon = d.toLocaleString('en-US', { month: 'short' });
-  return `${st.dir ? 'drwxr-xr-x' : '-rw-r--r--'}   1 ${String(user).toLowerCase().padEnd(8)} 0        ${String(st.size || 0).padStart(10)} ${mon} ${String(d.getDate()).padStart(2)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} ${name}`;
+  const ms = st.path && !ifs.isQsys(st.path) ? ifsaut.modeString(st.path, st.dir) : st.dir ? 'drwxr-xr-x' : '-rw-r--r--';
+  return `${ms}   1 ${String(st.owner || user).toLowerCase().padEnd(8)} 0        ${String(st.size || 0).padStart(10)} ${mon} ${String(d.getDate()).padStart(2)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')} ${name}`;
 }
 
 // /QSYS.LIB: bibliotecas y archivos como directorios, miembros como archivos de texto
@@ -71,6 +75,8 @@ async function qsysList(p) {
 }
 
 function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
+  // Cada petición SFTP se atiende con el perfil del usuario (autorizaciones del IFS)
+  const on = (ev, fn) => sftp.on(ev, (...args) => withCtx(ctx, () => fn(...args)));
   const handles = new Map();
   let seq = 0;
   const home = ifs.homeDir(user);
@@ -81,22 +87,28 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
   const statAny = async (p) => (ifs.isQsys(p) ? qsysStat(p) : ifs.stat(p));
   const log = (op, p) => logJob(ctx.job, '', '*INFO', `SFTP ${op} ${p}`);
 
-  sftp.on('REALPATH', (reqid, p) => {
+  on('REALPATH', (reqid, p) => {
     const r = abs(p);
     sftp.name(reqid, [{ filename: r, longname: r, attrs: {} }]);
   });
-  sftp.on('STAT', async (reqid, p) => { const st = await statAny(abs(p)); if (!st) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE); sftp.attrs(reqid, attrsOf(st)); });
-  sftp.on('LSTAT', async (reqid, p) => { const st = await statAny(abs(p)); if (!st) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE); sftp.attrs(reqid, attrsOf(st)); });
-  sftp.on('FSTAT', async (reqid, h) => {
+  on('STAT', async (reqid, p) => { const st = await statAny(abs(p)); if (!st) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE); sftp.attrs(reqid, attrsOf(st)); });
+  on('LSTAT', async (reqid, p) => { const st = await statAny(abs(p)); if (!st) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE); sftp.attrs(reqid, attrsOf(st)); });
+  on('FSTAT', async (reqid, h) => {
     const x = get(h);
     if (!x) return sftp.status(reqid, STATUS_CODE.FAILURE);
     if (x.kind === 'mbr') return sftp.attrs(reqid, attrsOf({ dir: false, size: x.buf.length }));
     try { const st = await x.fh.stat(); sftp.attrs(reqid, attrsOf({ dir: false, size: st.size, mtime: st.mtime })); } catch (e) { fail(reqid, e); }
   });
-  sftp.on('SETSTAT', (reqid) => sftp.status(reqid, STATUS_CODE.OK));
-  sftp.on('FSETSTAT', (reqid) => sftp.status(reqid, STATUS_CODE.OK));
+  on('SETSTAT', async (reqid, p, attrs) => {
+    const r = abs(p);
+    try {
+      if (attrs && typeof attrs.mode === 'number' && !ifs.isQsys(r) && (await ifs.stat(r))) { await ifsaut.mayManage(r); await ifsaut.chmod(r, attrs.mode & 0o777); }
+      sftp.status(reqid, STATUS_CODE.OK);
+    } catch (e) { fail(reqid, e); }
+  });
+  on('FSETSTAT', (reqid) => sftp.status(reqid, STATUS_CODE.OK));
 
-  sftp.on('OPENDIR', async (reqid, p) => {
+  on('OPENDIR', async (reqid, p) => {
     const dir = abs(p);
     try {
       let items;
@@ -104,13 +116,13 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
       else {
         const st = await ifs.stat(dir);
         if (!st || !st.dir) return sftp.status(reqid, STATUS_CODE.NO_SUCH_FILE);
-        items = (await ifs.list(dir)).map((e) => ({ name: e.name, dir: e.dir, size: e.size, mtime: e.mtime }));
+        items = (await ifs.list(dir)).map((e) => ({ name: e.name, dir: e.dir, size: e.size, mtime: e.mtime, path: e.path, owner: e.owner }));
       }
       log('OPENDIR', dir);
       sftp.handle(reqid, newHandle({ kind: 'dir', items: [{ name: '.', dir: true }, { name: '..', dir: true }, ...items], done: false }));
     } catch (e) { fail(reqid, e); }
   });
-  sftp.on('READDIR', (reqid, h) => {
+  on('READDIR', (reqid, h) => {
     const x = get(h);
     if (!x || x.kind !== 'dir') return sftp.status(reqid, STATUS_CODE.FAILURE);
     if (x.done) return sftp.status(reqid, STATUS_CODE.EOF);
@@ -118,7 +130,7 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
     sftp.name(reqid, x.items.map((it) => ({ filename: it.name, longname: longname(it.name, it, user), attrs: attrsOf(it) })));
   });
 
-  sftp.on('OPEN', async (reqid, filename, flags) => {
+  on('OPEN', async (reqid, filename, flags) => {
     const p = abs(filename);
     const write = !!(flags & (OPEN_MODE.WRITE | OPEN_MODE.APPEND | OPEN_MODE.CREAT | OPEN_MODE.TRUNC));
     try {
@@ -133,13 +145,15 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
       let mode = 'r';
       if (write) mode = flags & OPEN_MODE.APPEND ? 'a' : flags & OPEN_MODE.READ ? (flags & OPEN_MODE.TRUNC ? 'w+' : 'r+') : 'w';
       if (mode === 'r+' && !(await ifs.stat(p))) mode = 'w+';
+      const after = await ifs.checkOpen(p, write);
       if (write) await fsp.mkdir(path.dirname(ifs.real(p)), { recursive: true });
       const fh = await fsp.open(ifs.real(p), mode);
+      await after();
       log(write ? 'PUT' : 'GET', p);
       sftp.handle(reqid, newHandle({ kind: 'file', fh, path: p }));
     } catch (e) { fail(reqid, e); }
   });
-  sftp.on('READ', async (reqid, h, offset, length) => {
+  on('READ', async (reqid, h, offset, length) => {
     const x = get(h);
     if (!x) return sftp.status(reqid, STATUS_CODE.FAILURE);
     if (x.kind === 'mbr') {
@@ -153,7 +167,7 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
       sftp.data(reqid, b.subarray(0, bytesRead));
     } catch (e) { fail(reqid, e); }
   });
-  sftp.on('WRITE', async (reqid, h, offset, data) => {
+  on('WRITE', async (reqid, h, offset, data) => {
     const x = get(h);
     if (!x) return sftp.status(reqid, STATUS_CODE.FAILURE);
     if (x.kind === 'mbr') {
@@ -165,7 +179,7 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
     }
     try { await x.fh.write(data, 0, data.length, offset); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); }
   });
-  sftp.on('CLOSE', async (reqid, h) => {
+  on('CLOSE', async (reqid, h) => {
     const x = get(h);
     if (!x) return sftp.status(reqid, STATUS_CODE.FAILURE);
     handles.delete(Buffer.from(h).toString('hex'));
@@ -175,14 +189,14 @@ function sftpSession(sftp, ctx, user, { OPEN_MODE, STATUS_CODE }) {
       sftp.status(reqid, STATUS_CODE.OK);
     } catch (e) { fail(reqid, e); }
   });
-  sftp.on('REMOVE', async (reqid, p) => { try { await ifs.unlink(abs(p)); log('RM', abs(p)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
-  sftp.on('MKDIR', async (reqid, p) => { try { await ifs.mkdir(abs(p)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
-  sftp.on('RMDIR', async (reqid, p) => { try { await ifs.rmdir(abs(p)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
-  sftp.on('RENAME', async (reqid, a, b) => { try { await ifs.rename(abs(a), abs(b)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
-  sftp.on('READLINK', (reqid) => sftp.status(reqid, STATUS_CODE.OP_UNSUPPORTED));
-  sftp.on('SYMLINK', (reqid) => sftp.status(reqid, STATUS_CODE.OP_UNSUPPORTED));
+  on('REMOVE', async (reqid, p) => { try { await ifs.unlink(abs(p)); log('RM', abs(p)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
+  on('MKDIR', async (reqid, p) => { try { await ifs.mkdir(abs(p)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
+  on('RMDIR', async (reqid, p) => { try { await ifs.rmdir(abs(p)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
+  on('RENAME', async (reqid, a, b) => { try { await ifs.rename(abs(a), abs(b)); sftp.status(reqid, STATUS_CODE.OK); } catch (e) { fail(reqid, e); } });
+  on('READLINK', (reqid) => sftp.status(reqid, STATUS_CODE.OP_UNSUPPORTED));
+  on('SYMLINK', (reqid) => sftp.status(reqid, STATUS_CODE.OP_UNSUPPORTED));
   // EOF del cliente ('bye'): cerrar los archivos abiertos y el canal, o el cliente espera indefinidamente
-  sftp.on('end', async () => {
+  on('end', async () => {
     for (const x of handles.values()) if (x.kind === 'file') await x.fh.close().catch(() => {});
     handles.clear();
     sftp.end();

@@ -206,7 +206,25 @@ const TABLE_FUNCS = {
     const sub = String(o.SUBTREE_DIRECTORIES || 'NO').toUpperCase() === 'YES';
     const list = [await stat(root), ...(await walk(root, sub ? 8 : 0))].filter(Boolean);
     const cols = [['PATH_NAME', 'VARCHAR(1024)'], ['OBJECT_TYPE', 'VARCHAR(10)'], ['DATA_SIZE', 'BIGINT'], ['OBJECT_OWNER', 'VARCHAR(10)'], ['CREATE_TIMESTAMP', 'TIMESTAMP'], ['DATA_CHANGE_TIMESTAMP', 'TIMESTAMP'], ['CCSID', 'INTEGER']];
-    return valuesTable(cols, list.map((s) => [s.path, s.type, s.size, 'QSYS', tsOf(+s.ctime), tsOf(+s.mtime), 1208]));
+    return valuesTable(cols, list.map((s) => [s.path, s.type, s.size, s.owner || 'QSYS', tsOf(+s.ctime), tsOf(+s.mtime), 1208]));
+  },
+  // Autorizaciones de un objeto del IFS (propietario, grupo primario, privadas y *PUBLIC)
+  async IFS_OBJECT_PRIVILEGES(ctx, a) {
+    const o = named(a, ['PATH_NAME']);
+    const { stat } = await import('../ifs.js');
+    const { privileges } = await import('../ifsaut.js');
+    const p = String(o.PATH_NAME || '/');
+    const st = await stat(p);
+    const cols = [['AUTHORIZATION_NAME', 'VARCHAR(10)'], ['DATA_AUTHORITY', 'VARCHAR(10)'], ['OBJECT_OPERATIONAL', 'VARCHAR(3)'], ['OBJECT_MANAGEMENT', 'VARCHAR(3)'],
+      ['OBJECT_EXISTENCE', 'VARCHAR(3)'], ['OBJECT_ALTER', 'VARCHAR(3)'], ['OBJECT_REFERENCE', 'VARCHAR(3)'], ['DATA_READ', 'VARCHAR(3)'], ['DATA_ADD', 'VARCHAR(3)'],
+      ['DATA_UPDATE', 'VARCHAR(3)'], ['DATA_DELETE', 'VARCHAR(3)'], ['DATA_EXECUTE', 'VARCHAR(3)'], ['OWNER', 'VARCHAR(10)'], ['AUTHORIZATION_LIST', 'VARCHAR(10)'], ['PRIMARY_GROUP', 'VARCHAR(10)'], ['PATH_NAME', 'VARCHAR(1024)']];
+    const yn = (b) => (b ? 'YES' : 'NO');
+    return valuesTable(cols, st ? privileges(st.path).map((r) => {
+      const d = r.dta.replace('*', '');
+      const has = (c) => r.dta !== '*EXCLUDE' && r.dta !== '*AUTL' && d.includes(c);
+      return [r.user, r.dta, yn(has('R') || has('W') || has('X')), yn(r.obj.has('*OBJMGT')), yn(r.obj.has('*OBJEXIST')), yn(r.obj.has('*OBJALTER')), yn(r.obj.has('*OBJREF')),
+        yn(has('R')), yn(has('W')), yn(has('W')), yn(has('W')), yn(has('X')), r.owner, r.autl, r.pgp, st.path];
+    }) : []);
   },
 };
 for (const k of Object.keys(VIRTUAL)) if (!TABLE_FUNCS[k]) TABLE_FUNCS[k] = (ctx) => VIRTUAL[k](ctx);

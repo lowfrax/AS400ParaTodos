@@ -30,6 +30,7 @@ async function ftp(cmds, { user = 'QSECOFR', pwd = 'QSECOFR', host = '127.0.0.1'
       ds.on('data', (c) => chunks.push(c));
       const first = await send(`${verb} ${arg}`);
       if (verb === 'STOR') { ds.end(data); }
+      if (/^[45]/.test(first)) ds.destroy();
       await done;
       const last = /^1/.test(first) ? await reply() : first;
       out[arg] = { reply: last, data: Buffer.concat(chunks) };
@@ -410,6 +411,86 @@ ENDPGM`);
     check('fuente erróneo: CPF0201 con diagnóstico CPD0204', errId(cb) === 'CPF0201' && /CPD0204/.test(JSON.stringify(cb.joblog || [])), cb);
     check('DLTCMD', ok(await cmd(`DLTCMD CMD(${LIB}/SALUDAR)`)) && errId(await cmd(`SALUDAR NOMBRE(X) SALIDA(${LIB}/RES)`)) === 'CPD0030');
     await cmd(`RMVLIBLE LIB(${LIB})`);
+  }
+
+  if (want('ifsaut')) {
+    // Autorizaciones del IFS: datos (*R *W *X), objeto (*OBJEXIST *OBJMGT), propietario, grupo primario, lista de autorizaciones
+    const D = '/tmp/autprueba';
+    const U = auth('IFSUSR');
+    const ifsGet = (p, h = SECOFR) => fetch(`${BASE}/api/v1/ifs${p}`, { headers: h }).then(async (r) => ({ status: r.status, text: await r.text() }));
+    const ifsPut = (p, body, h = SECOFR) => fetch(`${BASE}/api/v1/ifs${p}`, { method: 'PUT', headers: { ...h, 'Content-Type': 'text/plain' }, body }).then(async (r) => ({ status: r.status, text: await r.text() }));
+    const ifsDel = (p, h = SECOFR) => fetch(`${BASE}/api/v1/ifs${p}`, { method: 'DELETE', headers: h }).then(async (r) => ({ status: r.status, text: await r.text() }));
+    await cmd(`RMVDIR DIR('${D}') SUBTREE(*ALL)`);
+    for (const u of ['IFSUSR', 'IFSGRP']) await cmd(`DLTUSRPRF USRPRF(${u})`);
+    await cmd('DLTAUTL AUTL(IFSAUTL)');
+    await cmd("CRTUSRPRF USRPRF(IFSGRP) PASSWORD(*NONE) USRCLS(*USER) TEXT('Grupo IFS')");
+    await cmd("CRTUSRPRF USRPRF(IFSUSR) PASSWORD(IFSUSR) USRCLS(*USER) TEXT('Usuario IFS')");
+    check('MKDIR', ok(await cmd(`MKDIR DIR('${D}')`)));
+    await ifsPut(`${D}/secreto.txt`, 'confidencial\n');
+    const da = await cmd(`DSPAUT OBJ('${D}/secreto.txt')`);
+    check('DSPAUT: propietario el creador, *PUBLIC heredado del directorio (*RWX)', /Owner[ .]*:\s+QSECOFR/.test(JSON.stringify(da)) && /\*PUBLIC\s+\*RWX/.test(da.text || JSON.stringify(da)), da);
+    check('CHGAUT *PUBLIC *EXCLUDE', ok(await cmd(`CHGAUT OBJ('${D}/secreto.txt') USER(*PUBLIC) DTAAUT(*EXCLUDE) OBJAUT(*NONE)`)));
+    const g1 = await ifsGet(`${D}/secreto.txt`, U);
+    check('sin autorización: 403 CPFA09C', g1.status === 403 && /CPFA09C/.test(g1.text), g1);
+    await cmd(`CHGAUT OBJ('${D}/secreto.txt') USER(IFSUSR) DTAAUT(*R)`);
+    const g2 = await ifsGet(`${D}/secreto.txt`, U);
+    check('privada *R: puede leer', g2.status === 200 && /confidencial/.test(g2.text), g2);
+    const w1 = await ifsPut(`${D}/secreto.txt`, 'cambiado', U);
+    check('privada *R: no puede escribir', w1.status === 403, w1);
+    await cmd(`CHGAUT OBJ('${D}') USER(*PUBLIC) DTAAUT(*RX) OBJAUT(*NONE)`);
+    const c1 = await ifsPut(`${D}/nuevo.txt`, 'hola', U);
+    check('crear en un directorio con *RX: no', c1.status === 403, c1);
+    await cmd(`CHGAUT OBJ('${D}') USER(IFSUSR) DTAAUT(*RWX)`);
+    const c2 = await ifsPut(`${D}/nuevo.txt`, 'hola', U);
+    const dn = await cmd(`DSPAUT OBJ('${D}/nuevo.txt')`);
+    check('con *WX en el directorio crea, y es el propietario; hereda la privada del directorio', c2.status === 201 && /Owner[ .]*:\s+IFSUSR/.test(JSON.stringify(dn)) && /\*PUBLIC\s+\*RX/.test(JSON.stringify(dn)) && /IFSUSR\s+\*RWX/.test(JSON.stringify(dn)), [c2, dn]);
+    const d1 = await ifsDel(`${D}/secreto.txt`, U);
+    check('borrar sin *OBJEXIST: no', d1.status === 403, d1);
+    check('CHGOWN', ok(await cmd(`CHGOWN OBJ('${D}/secreto.txt') NEWOWN(IFSUSR)`)));
+    const d2 = await ifsDel(`${D}/secreto.txt`, U);
+    check('el nuevo propietario puede borrarlo', d2.status === 200, d2);
+    // *X en la ruta
+    await cmd(`MKDIR DIR('${D}/cerrado')`);
+    await ifsPut(`${D}/cerrado/dentro.txt`, 'x');
+    await cmd(`CHGAUT OBJ('${D}/cerrado') USER(*PUBLIC) DTAAUT(*EXCLUDE)`);
+    // la privada de IFSUSR la heredó del directorio padre: se quita
+    await cmd(`CHGAUT OBJ('${D}/cerrado') USER(IFSUSR) DTAAUT(*NONE) OBJAUT(*NONE)`);
+    await cmd(`CHGAUT OBJ('${D}/cerrado/dentro.txt') USER(*PUBLIC) DTAAUT(*RWX)`);
+    const x1 = await ifsGet(`${D}/cerrado/dentro.txt`, U);
+    check('sin *X en un directorio de la ruta no se llega al objeto', x1.status === 403 && /cerrado/.test(x1.text), x1);
+    // Grupo primario
+    await cmd('CHGUSRPRF USRPRF(IFSUSR) GRPPRF(IFSGRP)');
+    await cmd(`CHGPGP OBJ('${D}/cerrado') NEWPGP(IFSGRP)`);
+    await cmd(`CHGAUT OBJ('${D}/cerrado') USER(IFSGRP) DTAAUT(*RX)`);
+    const x2 = await ifsGet(`${D}/cerrado/dentro.txt`, U);
+    check('grupo primario con *RX: el miembro del grupo pasa', x2.status === 200, x2);
+    // Lista de autorizaciones
+    await ifsPut(`${D}/lista.txt`, 'por lista');
+    await cmd(`CHGAUT OBJ('${D}/lista.txt') USER(*PUBLIC) DTAAUT(*EXCLUDE)`);
+    await cmd(`CHGAUT OBJ('${D}/lista.txt') USER(IFSUSR) DTAAUT(*NONE) OBJAUT(*NONE)`);
+    await cmd('CRTAUTL AUTL(IFSAUTL) AUT(*EXCLUDE)');
+    await cmd('ADDAUTLE AUTL(IFSAUTL) USER(IFSUSR) AUT(*USE)');
+    const l0 = await ifsGet(`${D}/lista.txt`, U);
+    await cmd(`CHGAUT OBJ('${D}/lista.txt') AUTL(IFSAUTL)`);
+    await cmd(`CHGAUT OBJ('${D}/lista.txt') USER(*PUBLIC) DTAAUT(*AUTL)`);
+    const l1 = await ifsGet(`${D}/lista.txt`, U);
+    check('lista de autorizaciones (*USE) en un objeto del IFS', l0.status === 403 && l1.status === 200, [l0, l1]);
+    // SQL y QSH
+    const sp = await sql(`SELECT AUTHORIZATION_NAME, DATA_AUTHORITY, OBJECT_EXISTENCE, OWNER FROM TABLE(QSYS2.IFS_OBJECT_PRIVILEGES(PATH_NAME => '${D}/nuevo.txt')) X`);
+    check('QSYS2.IFS_OBJECT_PRIVILEGES', JSON.stringify(sp.data || []).includes('"AUTHORIZATION_NAME":"*PUBLIC","DATA_AUTHORITY":"*RX"') && /"OWNER":"IFSUSR"/.test(JSON.stringify(sp.data)), sp);
+    const ch = await cmd(`QSH CMD('chmod 700 ${D}/nuevo.txt && ls -l ${D}/nuevo.txt > ${D}/ls.out')`, U);
+    const lo = await ifsGet(`${D}/ls.out`);
+    const da2 = await cmd(`DSPAUT OBJ('${D}/nuevo.txt')`);
+    check('QSH chmod 700 por el propietario: *PUBLIC *EXCLUDE; ls -l muestra -rwx------', ok(ch) && /-rwx------\s+1 ifsusr/.test(lo.text) && /\*PUBLIC\s+\*EXCLUDE/.test(JSON.stringify(da2)), [ch, lo, da2]);
+    const ftpD = await ftp([['CWD', D], ['RETR', `${D}/lista.txt`]], { user: 'DEMO', pwd: 'DEMO' });
+    check('FTP: RETR sin autorización → 550', /^550/.test(ftpD[`${D}/lista.txt`].reply), ftpD);
+    check('CHGAUT por quien no es propietario: CPFA09C', errId(await cmd(`CHGAUT OBJ('${D}/lista.txt') USER(*PUBLIC) DTAAUT(*RWX)`, U)) === 'CPFA09C');
+    check('RMVDIR SUBTREE(*ALL) de otro usuario sin *OBJEXIST: no', errId(await cmd(`RMVDIR DIR('${D}') SUBTREE(*ALL)`, U)) === 'CPFA09C');
+    check('RMVDIR SUBTREE(*ALL) del responsable de seguridad', ok(await cmd(`RMVDIR DIR('${D}') SUBTREE(*ALL)`)));
+    const gone = await sql(`SELECT COUNT(*) AS N FROM QSYS.IFSAUT WHERE PATH LIKE '${D}%'`);
+    check('al borrar desaparecen sus autorizaciones', gone.data && gone.data[0].N === 0, gone);
+    await cmd('DLTAUTL AUTL(IFSAUTL)');
+    for (const u of ['IFSUSR', 'IFSGRP']) await cmd(`DLTUSRPRF USRPRF(${u})`);
   }
 
   if (!failed) await cmd(`DLTLIB LIB(${LIB})`);
